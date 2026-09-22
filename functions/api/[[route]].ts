@@ -412,4 +412,5 @@ app.post('/settings', async (c) => {
   return c.json({ success: true });
 });
 
+export { app };
 export const onRequest = handle(app);
