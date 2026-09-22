@@ -13,7 +13,7 @@
     "pages:dev": "npm run build && wrangler pages dev dist --d1=DB --compatibility-flag=nodejs_compat",
     "d1:migrate:local": "wrangler d1 execute lenz-db --local --file=./migrations/0001_initial_schema.sql",
     "d1:migrate:remote": "wrangler d1 execute lenz-db --remote --file=./migrations/0001_initial_schema.sql",
-    "deploy": "npm run build && wrangler pages deploy dist --project-name=lenz"
+    "deploy": "npm run build && wrangler deploy worker/index.ts --assets=./dist"
   },
   "bugs": {
     "url": "https://github.com/amirHHP/lenz/issues"
