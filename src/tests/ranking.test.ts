@@ -1,11 +1,14 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { 
+  normalizePersian,
   extractKeywords, 
   calculateImportanceScore, 
   getUserTasteProfile, 
   saveUserTasteProfile, 
   onArticleStarred,
-  onHighlightCreated
+  onArticleUnstarred,
+  onHighlightCreated,
+  onHighlightDeleted
 } from '../server/ranking.js';
 import { db, initDatabase } from '../server/db.js';
 
@@ -74,5 +77,33 @@ describe('Lenz Smart Ranking & Taste Engine', () => {
     const profileAfterHighlight = getUserTasteProfile();
     expect(profileAfterHighlight.highlightCount).toBeGreaterThan(profileBefore.highlightCount || 0);
     expect(profileAfterHighlight.topics['پساکوانتومی']).toBeGreaterThan(0);
+
+    // Unstar article: should reduce weight and count
+    onArticleUnstarred(articleId);
+    const profileAfterUnstar = getUserTasteProfile();
+    expect(profileAfterUnstar.starredCount).toBeLessThan(profileAfterStar.starredCount);
+
+    // Delete highlight: should reduce weight and count
+    onHighlightDeleted(articleId, 'الگوریتم‌های رمزنگاری پساکوانتومی');
+    const profileAfterHlDelete = getUserTasteProfile();
+    expect(profileAfterHlDelete.highlightCount).toBeLessThan(profileAfterHighlight.highlightCount);
+  });
+
+  it('should normalize Persian text characters and remove diacritics', () => {
+    // Arabic Kaf and Yeh vs Persian Kaf and Yeh
+    const rawArabic = 'شَبَكَةٌ ذَكِيَّةٌ';
+    const normalized = normalizePersian(rawArabic);
+    expect(normalized).toContain('ک'); // kaf normalized
+    expect(normalized).toContain('ی'); // yeh normalized
+    expect(normalized).not.toContain('ك'); // no arabic kaf
+    expect(normalized).not.toContain('ي'); // no arabic yeh
+    expect(normalized).not.toContain('ً'); // no tanween
+  });
+
+  it('should extract informative n-grams/bigrams in addition to unigrams', () => {
+    const text = 'پیشرفت هوش مصنوعی و یادگیری عمیق در ایران';
+    const keywords = extractKeywords(text);
+    expect(keywords).toContain('هوش مصنوعی');
+    expect(keywords).toContain('یادگیری عمیق');
   });
 });

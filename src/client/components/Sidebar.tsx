@@ -36,6 +36,17 @@ interface Props {
   onOpenShortcuts: () => void;
   onOpenSettings: () => void;
   onDeleteFeed: (feedId: number) => void;
+  onUpdateFeed?: (feedId: number, folderId: number | null, title?: string) => void;
+  onDeleteFolder?: (folderId: number) => void;
+}
+
+function safeDomain(urlStr: string): string {
+  try {
+    const formatted = urlStr.startsWith('http://') || urlStr.startsWith('https://') ? urlStr : `https://${urlStr}`;
+    return new URL(formatted).hostname;
+  } catch {
+    return '';
+  }
 }
 
 export const Sidebar: React.FC<Props> = ({
@@ -54,7 +65,9 @@ export const Sidebar: React.FC<Props> = ({
   onOpenTasteProfile,
   onOpenShortcuts,
   onOpenSettings,
-  onDeleteFeed
+  onDeleteFeed,
+  onUpdateFeed,
+  onDeleteFolder
 }) => {
   const [collapsedFolders, setCollapsedFolders] = useState<Record<number, boolean>>({});
 
@@ -125,7 +138,7 @@ export const Sidebar: React.FC<Props> = ({
             <span>همه اخبار</span>
           </div>
           {unreadTotal > 0 && (
-            <span className="text-[10px] px-1.5 py-0.2 bg-zinc-200 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 rounded-full font-bold">
+            <span className="text-[10px] px-1.5 py-0.5 bg-zinc-200 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 rounded-full font-bold">
               {unreadTotal}
             </span>
           )}
@@ -211,6 +224,18 @@ export const Sidebar: React.FC<Props> = ({
                         {folder.unread_count}
                       </span>
                     )}
+                    {onDeleteFolder && (
+                      <button
+                        onClick={e => {
+                          e.stopPropagation();
+                          onDeleteFolder(folder.id);
+                        }}
+                        title="حذف پوشه"
+                        className="opacity-0 group-hover:opacity-100 p-0.5 text-zinc-400 hover:text-rose-500 transition-opacity"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    )}
                     <button
                       onClick={() => toggleFolder(folder.id)}
                       className="p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200"
@@ -229,6 +254,7 @@ export const Sidebar: React.FC<Props> = ({
                   <div className="pr-4 space-y-0.5 border-r border-zinc-200/80 dark:border-zinc-800 mr-2">
                     {folderFeeds.map(feed => {
                       const isFeedActive = activeView.type === 'feed' && activeView.feedId === feed.id;
+                      const domain = safeDomain(feed.site_url || feed.url);
                       return (
                         <div
                           key={feed.id}
@@ -243,7 +269,7 @@ export const Sidebar: React.FC<Props> = ({
                             className="flex items-center gap-1.5 truncate flex-1 text-right"
                           >
                             <img
-                              src={feed.icon_url || `https://www.google.com/s2/favicons?domain=${new URL(feed.url).hostname}&sz=32`}
+                              src={feed.icon_url || (domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=32` : '')}
                               alt=""
                               className="w-3.5 h-3.5 rounded-xs shrink-0"
                               onError={e => {
@@ -254,6 +280,22 @@ export const Sidebar: React.FC<Props> = ({
                           </button>
 
                           <div className="flex items-center gap-1">
+                            {onUpdateFeed && (
+                              <select
+                                value={feed.folder_id || ''}
+                                onChange={e => {
+                                  e.stopPropagation();
+                                  onUpdateFeed(feed.id, e.target.value ? Number(e.target.value) : null);
+                                }}
+                                title="تغییر پوشه"
+                                className="opacity-0 group-hover:opacity-100 text-[9px] bg-zinc-100 dark:bg-zinc-800 rounded px-1 py-0.5 border border-zinc-200 dark:border-zinc-700 text-zinc-500 transition-opacity"
+                              >
+                                <option value="">(بدون پوشه)</option>
+                                {folders.map(f => (
+                                  <option key={f.id} value={f.id}>{f.name}</option>
+                                ))}
+                              </select>
+                            )}
                             {(feed.unread_count || 0) > 0 && (
                               <span className="text-[10px] text-zinc-400">{feed.unread_count}</span>
                             )}
@@ -277,6 +319,7 @@ export const Sidebar: React.FC<Props> = ({
           {/* Uncategorized Feeds */}
           {feeds.filter(f => !f.folder_id).map(feed => {
             const isFeedActive = activeView.type === 'feed' && activeView.feedId === feed.id;
+            const domain = safeDomain(feed.site_url || feed.url);
             return (
               <div
                 key={feed.id}
@@ -291,7 +334,7 @@ export const Sidebar: React.FC<Props> = ({
                   className="flex items-center gap-2 truncate flex-1 text-right"
                 >
                   <img
-                    src={feed.icon_url || `https://www.google.com/s2/favicons?domain=${new URL(feed.url).hostname}&sz=32`}
+                    src={feed.icon_url || (domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=32` : '')}
                     alt=""
                     className="w-3.5 h-3.5 rounded-xs shrink-0"
                     onError={e => {
@@ -302,6 +345,22 @@ export const Sidebar: React.FC<Props> = ({
                 </button>
 
                 <div className="flex items-center gap-1">
+                  {onUpdateFeed && (
+                    <select
+                      value=""
+                      onChange={e => {
+                        e.stopPropagation();
+                        onUpdateFeed(feed.id, e.target.value ? Number(e.target.value) : null);
+                      }}
+                      title="انتقال به پوشه"
+                      className="opacity-0 group-hover:opacity-100 text-[9px] bg-zinc-100 dark:bg-zinc-800 rounded px-1 py-0.5 border border-zinc-200 dark:border-zinc-700 text-zinc-500 transition-opacity"
+                    >
+                      <option value="">پوشه‌بندی...</option>
+                      {folders.map(f => (
+                        <option key={f.id} value={f.id}>{f.name}</option>
+                      ))}
+                    </select>
+                  )}
                   {(feed.unread_count || 0) > 0 && (
                     <span className="text-[10px] text-zinc-400">{feed.unread_count}</span>
                   )}

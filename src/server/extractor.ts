@@ -34,7 +34,27 @@ export async function extractFullArticle(url: string): Promise<ExtractedArticle 
 
     const html = await response.text();
     const dom = new JSDOM(html, { url });
-    const reader = new Readability(dom.window.document);
+    const doc = dom.window.document;
+
+    // Resolve relative image src and link href to absolute URLs
+    doc.querySelectorAll('img').forEach(img => {
+      const src = img.getAttribute('src');
+      if (src && !src.startsWith('data:')) {
+        try {
+          img.setAttribute('src', new URL(src, url).href);
+        } catch {}
+      }
+    });
+    doc.querySelectorAll('a').forEach(a => {
+      const href = a.getAttribute('href');
+      if (href && !href.startsWith('#') && !href.startsWith('mailto:') && !href.startsWith('javascript:')) {
+        try {
+          a.setAttribute('href', new URL(href, url).href);
+        } catch {}
+      }
+    });
+
+    const reader = new Readability(doc);
     const article = reader.parse();
 
     if (!article || !article.content) {

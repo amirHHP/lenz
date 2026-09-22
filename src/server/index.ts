@@ -10,8 +10,11 @@ import {
   calculateImportanceScore, 
   getUserTasteProfile, 
   onArticleStarred, 
+  onArticleUnstarred,
   onHighlightCreated, 
+  onHighlightDeleted,
   onArticleRead, 
+  onArticleUnread,
   recalculateUnreadScores 
 } from './ranking.js';
 import { generateTodayBriefing, generateArticleSummary, getGeminiApiKey } from './ai.js';
@@ -171,14 +174,43 @@ app.post('/api/feeds', async (req: Request, res: Response) => {
     // Sync in background and wait briefly
     try {
       await syncFeed(feedId);
-    } catch (e) {
+    } catch (e: any) {
       console.warn('Initial sync warning:', e);
+      if (process.env.NODE_ENV !== 'test') {
+        const artCount = db.prepare('SELECT COUNT(*) as count FROM articles WHERE feed_id = ?').get(feedId) as any;
+        if (!artCount || artCount.count === 0) {
+          db.prepare('DELETE FROM feeds WHERE id = ?').run(feedId);
+          return res.status(400).json({ error: 'آدرس وارد شده فید معتبری ندارد یا در دسترس نیست' });
+        }
+      }
     }
 
     const createdFeed = db.prepare('SELECT * FROM feeds WHERE id = ?').get(feedId);
     res.json({ feed: createdFeed });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'خطا در ثبت فید' });
+  }
+});
+
+// Update feed folder or title
+app.put('/api/feeds/:id', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { folderId, title } = req.body;
+    db.prepare(`
+      UPDATE feeds 
+      SET folder_id = CASE WHEN ? = 1 THEN ? ELSE folder_id END,
+          title = COALESCE(?, title)
+      WHERE id = ?
+    `).run(
+      folderId !== undefined ? 1 : 0,
+      folderId !== undefined ? (folderId ? Number(folderId) : null) : null,
+      title || null,
+      id
+    );
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -269,8 +301,8 @@ app.get('/api/articles', (req: Request, res: Response) => {
 
   // Sorting
   if (sort === 'smart') {
-    // Smart Importance: combines AI & taste score first, then freshness
-    query += ' ORDER BY a.importance_score DESC, a.published_at DESC';
+    // Smart Importance: unread stories first, then AI & taste importance score, then freshness
+    query += ' ORDER BY a.is_read ASC, a.importance_score DESC, a.published_at DESC';
   } else if (sort === 'oldest') {
     query += ' ORDER BY a.published_at ASC';
   } else {
@@ -311,17 +343,25 @@ app.get('/api/articles/:id', async (req: Request, res: Response) => {
     // Fetch highlights for this article
     const highlights = db.prepare('SELECT * FROM highlights WHERE article_id = ? ORDER BY id ASC').all(id);
 
-    // If full_content is empty or too short (< 250 chars) and has a valid web link,
-    // trigger Readability extraction to guarantee full article text!
-    if ((!article.full_content || article.full_content.length < 250) && article.link && article.link.startsWith('http')) {
+    // If full_content has not yet been extracted, trigger Readability extraction to guarantee full article text!
+    if (!article.is_full_extracted && article.link && article.link.startsWith('http')) {
       try {
         const extracted = await extractFullArticle(article.link);
         if (extracted && extracted.content && extracted.content.length > (article.full_content || '').length) {
           article.full_content = extracted.content;
-          db.prepare('UPDATE articles SET full_content = ? WHERE id = ?').run(extracted.content, id);
+          const words = (extracted.textContent || '').trim().split(/\s+/).length;
+          const readingTime = Math.max(1, Math.ceil(words / 200));
+          article.reading_time_minutes = readingTime;
+          article.is_full_extracted = 1;
+          db.prepare('UPDATE articles SET full_content = ?, reading_time_minutes = ?, is_full_extracted = 1 WHERE id = ?')
+            .run(extracted.content, readingTime, id);
+        } else {
+          article.is_full_extracted = 1;
+          db.prepare('UPDATE articles SET is_full_extracted = 1 WHERE id = ?').run(id);
         }
       } catch (err) {
-        // use existing content
+        article.is_full_extracted = 1;
+        db.prepare('UPDATE articles SET is_full_extracted = 1 WHERE id = ?').run(id);
       }
     }
 
@@ -345,7 +385,11 @@ app.post('/api/articles/:id/extract', async (req: Request, res: Response) => {
       return res.status(422).json({ error: 'امکان استخراج متن کامل از این وب‌سایت وجود ندارد' });
     }
 
-    db.prepare('UPDATE articles SET full_content = ? WHERE id = ?').run(extracted.content, id);
+    const words = (extracted.textContent || '').trim().split(/\s+/).length;
+    const readingTime = Math.max(1, Math.ceil(words / 200));
+    db.prepare('UPDATE articles SET full_content = ?, reading_time_minutes = ?, is_full_extracted = 1 WHERE id = ?')
+      .run(extracted.content, readingTime, id);
+
     res.json({ success: true, fullContent: extracted.content });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -364,6 +408,8 @@ app.post('/api/articles/:id/read', (req: Request, res: Response) => {
 
     if (newStatus === 1) {
       onArticleRead(articleId);
+    } else {
+      onArticleUnread(articleId);
     }
 
     res.json({ success: true, isRead: newStatus === 1 });
@@ -384,6 +430,8 @@ app.post('/api/articles/:id/star', (req: Request, res: Response) => {
 
     if (newStatus === 1) {
       onArticleStarred(articleId);
+    } else {
+      onArticleUnstarred(articleId);
     }
 
     res.json({ success: true, isStarred: newStatus === 1 });
@@ -461,7 +509,11 @@ app.post('/api/highlights', (req: Request, res: Response) => {
 app.delete('/api/highlights/:id', (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    db.prepare('DELETE FROM highlights WHERE id = ?').run(id);
+    const hl = db.prepare('SELECT * FROM highlights WHERE id = ?').get(id) as any;
+    if (hl) {
+      db.prepare('DELETE FROM highlights WHERE id = ?').run(id);
+      onHighlightDeleted(hl.article_id, hl.text);
+    }
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

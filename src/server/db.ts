@@ -46,6 +46,7 @@ export function initDatabase() {
       published_at DATETIME NOT NULL,
       summary TEXT,
       full_content TEXT,
+      is_full_extracted INTEGER DEFAULT 0,
       is_read INTEGER DEFAULT 0,
       is_starred INTEGER DEFAULT 0,
       reading_time_minutes INTEGER DEFAULT 2,
@@ -87,6 +88,13 @@ export function initDatabase() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   `);
+
+  // Migration: ensure is_full_extracted column exists on existing articles table
+  try {
+    db.exec('ALTER TABLE articles ADD COLUMN is_full_extracted INTEGER DEFAULT 0');
+  } catch {
+    // Column already exists
+  }
 
   // Seed default folders if empty
   const folderCount = db.prepare('SELECT COUNT(*) as count FROM folders').get() as { count: number };

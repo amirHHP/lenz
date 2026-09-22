@@ -68,7 +68,7 @@ describe('Lenz REST API Integration Tests', () => {
     const lowId = Number(artLow.lastInsertRowid);
 
     // Test Smart Sorting
-    const sortRes = await request(app).get('/api/articles?sort=smart');
+    const sortRes = await request(app).get(`/api/articles?feedId=${feed.id}&sort=smart&limit=100`);
     if (sortRes.status !== 200) {
       console.error('sortRes failed:', sortRes.status, sortRes.text, sortRes.headers);
     }
@@ -107,6 +107,38 @@ describe('Lenz REST API Integration Tests', () => {
     expect(detailRes.status).toBe(200);
     expect(detailRes.body.article.id).toBe(highId);
     expect(detailRes.body.highlights.length).toBeGreaterThan(0);
+
+    // Toggle Star OFF (Unstar)
+    const unstarRes = await request(app).post(`/api/articles/${highId}/star`).send({ isStarred: false });
+    expect(unstarRes.status).toBe(200);
+    expect(unstarRes.body.isStarred).toBe(false);
+
+    // Toggle Read OFF (Unread)
+    const unreadRes = await request(app).post(`/api/articles/${highId}/read`).send({ isRead: false });
+    expect(unreadRes.status).toBe(200);
+    expect(unreadRes.body.isRead).toBe(false);
+
+    // Delete Highlight
+    const delHlRes = await request(app).delete(`/api/highlights/${hlRes.body.id}`);
+    expect(delHlRes.status).toBe(200);
+    expect(delHlRes.body.success).toBe(true);
+  });
+
+  it('PUT /api/feeds/:id updates feed folder assignment and title', async () => {
+    const feed = db.prepare('SELECT id FROM feeds LIMIT 1').get() as { id: number };
+    const folder = db.prepare('SELECT id FROM folders LIMIT 1').get() as { id: number };
+    expect(feed).toBeDefined();
+    expect(folder).toBeDefined();
+
+    const res = await request(app)
+      .put(`/api/feeds/${feed.id}`)
+      .send({ folderId: folder.id, title: 'عنوان جدید فید' });
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+
+    const updated = db.prepare('SELECT * FROM feeds WHERE id = ?').get(feed.id) as any;
+    expect(updated.folder_id).toBe(folder.id);
+    expect(updated.title).toBe('عنوان جدید فید');
   });
 
   it('GET /api/briefing/today returns today summary', async () => {

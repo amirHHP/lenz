@@ -4,9 +4,10 @@ import { Highlight } from '../types';
 
 interface Props {
   onSelectArticle: (articleId: number) => void;
+  onDeleteHighlight?: () => void;
 }
 
-export const HighlightsView: React.FC<Props> = ({ onSelectArticle }) => {
+export const HighlightsView: React.FC<Props> = ({ onSelectArticle, onDeleteHighlight }) => {
   const [highlights, setHighlights] = useState<Highlight[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -32,6 +33,7 @@ export const HighlightsView: React.FC<Props> = ({ onSelectArticle }) => {
     try {
       await fetch(`/api/highlights/${id}`, { method: 'DELETE' });
       setHighlights(prev => prev.filter(h => h.id !== id));
+      onDeleteHighlight?.();
     } catch (err) {
       console.error(err);
     }

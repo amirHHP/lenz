@@ -147,8 +147,15 @@ export async function syncFeed(feedId: number): Promise<{ newCount: number }> {
     const title = item.title?.trim() || 'بدون عنوان';
     const link = item.link || feed.url;
     const author = item.creator || item.author || (parsed.title || '');
-    const pubDateStr = item.isoDate || item.pubDate || new Date().toISOString();
-    const publishedAt = new Date(pubDateStr).toISOString();
+    
+    let publishedAt = new Date().toISOString();
+    const pubDateStr = item.isoDate || item.pubDate;
+    if (pubDateStr) {
+      const parsedD = new Date(pubDateStr);
+      if (!isNaN(parsedD.getTime())) {
+        publishedAt = parsedD.toISOString();
+      }
+    }
 
     const rawContent = item['content:encoded'] || item.content || item.contentSnippet || '';
     const summary = item.contentSnippet || rawContent.replace(/<[^>]*>?/gm, '').slice(0, 350);
@@ -203,6 +210,14 @@ export async function syncAllFeeds(): Promise<{ totalNew: number }> {
     } catch (err) {
       console.error(`Error syncing feed ${feed.id}:`, err);
     }
+  }
+
+  // Recalculate freshness and importance scores across unread stories
+  try {
+    const { recalculateUnreadScores } = await import('./ranking.js');
+    recalculateUnreadScores();
+  } catch (err) {
+    // ignore
   }
 
   return { totalNew };

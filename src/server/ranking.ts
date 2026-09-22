@@ -15,11 +15,13 @@ export interface UserTasteProfile {
 }
 
 // Stopwords in Persian and English to filter out non-informative noise
+// Stopwords in Persian and English to filter out non-informative noise
 const STOPWORDS = new Set([
   // Persian stopwords
   'و', 'در', 'به', 'از', 'که', 'این', 'رو', 'با', 'برای', 'آن', 'یک', 'شود', 'شده', 'خود', 'ها', 'های',
   'یا', 'است', 'شد', 'کند', 'کرد', 'بود', 'تا', 'بر', 'نیز', 'وی', 'هم', 'اما', 'پس', 'چون', 'باید',
   'می', 'نمی', 'او', 'ما', 'شما', 'آنها', 'اگر', 'هر', 'چه', 'چند', 'بسیار', 'همه', 'بین', 'روی',
+  'بودن', 'شدن', 'کردن', 'داشتن', 'نیست', 'باشند', 'بوده', 'دارد', 'دارند',
   // English stopwords
   'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from',
   'up', 'about', 'into', 'over', 'after', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have',
@@ -29,45 +31,104 @@ const STOPWORDS = new Set([
 ]);
 
 /**
+ * Normalizes Persian and Arabic text variations (Yeh, Kaf, Tashdeed, Tanween, etc.)
+ */
+export function normalizePersian(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/\u064A/g, 'ی') // Arabic Yeh -> Persian Yeh
+    .replace(/\u0649/g, 'ی') // Alef Maksura -> Persian Yeh
+    .replace(/\u0643/g, 'ک') // Arabic Kaf -> Persian Kaf
+    .replace(/\u0629/g, 'ه') // Teh Marbuta -> Heh
+    .replace(/[\u064B-\u065F\u0670]/g, '') // Arabic diacritics
+    .replace(/\u0640/g, '') // Tatweel
+    .trim();
+}
+
+/**
  * Extracts clean, informative keywords and n-grams from text.
  */
 export function extractKeywords(text: string): string[] {
   if (!text) return [];
 
-  // Normalize text: lowercase, remove URLs, punctuation, special chars
-  const cleaned = text
+  // Normalize Persian and clean text
+  const normalized = normalizePersian(text)
     .toLowerCase()
     .replace(/https?:\/\/\S+/g, '')
-    .replace(/[^\w\u0600-\u06FF\s-]/g, ' ')
+    .replace(/[^\w\u0600-\u06FF\u200C\s-]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 
-  const words = cleaned.split(' ').filter(w => w.length > 2 && !STOPWORDS.has(w));
+  const rawWords = normalized.split(' ').filter(w => w.length > 1);
+  const filteredWords: string[] = [];
+
+  for (const w of rawWords) {
+    const cleanWord = w.replace(/^[\u200C-]+|[\u200C-]+$/g, '');
+    if (cleanWord.length > 1 && !STOPWORDS.has(cleanWord)) {
+      filteredWords.push(cleanWord);
+      // If word contains ZWNJ (e.g. نرم‌افزار), also index space-separated version (نرم افزار)
+      if (cleanWord.includes('\u200C')) {
+        filteredWords.push(cleanWord.replace(/\u200C/g, ' '));
+      }
+    }
+  }
 
   const frequency: Record<string, number> = {};
-  for (const word of words) {
+
+  // Unigram frequencies
+  for (const word of filteredWords) {
     frequency[word] = (frequency[word] || 0) + 1;
   }
 
-  // Sort by frequency and take top 15
+  // Bigrams (e.g. "هوش مصنوعی", "machine learning", "پردازش تصویر")
+  for (let i = 0; i < rawWords.length - 1; i++) {
+    const w1 = rawWords[i];
+    const w2 = rawWords[i + 1];
+    if (w1.length > 2 && w2.length > 2 && !STOPWORDS.has(w1) && !STOPWORDS.has(w2)) {
+      const bigram = `${w1} ${w2}`;
+      frequency[bigram] = (frequency[bigram] || 0) + 2;
+    }
+  }
+
+  // Sort by frequency and take top 25
   return Object.entries(frequency)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 15)
+    .slice(0, 25)
     .map(([w]) => w);
 }
 
 /**
- * Retrieves the current user taste profile from SQLite.
+ * Retrieves the current user taste profile from SQLite, synchronizing live counters.
  */
 export function getUserTasteProfile(): UserTasteProfile {
+  let readCount = 0;
+  let starredCount = 0;
+  let highlightCount = 0;
+
+  try {
+    const counts = db.prepare(`
+      SELECT 
+        (SELECT COUNT(*) FROM articles WHERE is_read = 1) as readCount,
+        (SELECT COUNT(*) FROM articles WHERE is_starred = 1) as starredCount,
+        (SELECT COUNT(*) FROM highlights) as highlightCount
+    `).get() as any;
+    if (counts) {
+      readCount = counts.readCount || 0;
+      starredCount = counts.starredCount || 0;
+      highlightCount = counts.highlightCount || 0;
+    }
+  } catch {
+    // fallback if DB not fully initialized
+  }
+
   const row = db.prepare('SELECT value FROM user_profile WHERE key = ?').get('taste_profile') as { value: string } | undefined;
   if (!row) {
     return {
       topics: {},
       feedAffinity: {},
-      readCount: 0,
-      starredCount: 0,
-      highlightCount: 0,
+      readCount,
+      starredCount,
+      highlightCount,
       lastUpdated: new Date().toISOString()
     };
   }
@@ -75,14 +136,21 @@ export function getUserTasteProfile(): UserTasteProfile {
     const parsed = JSON.parse(row.value);
     if (!parsed.topics) parsed.topics = {};
     if (!parsed.feedAffinity) parsed.feedAffinity = {};
-    return parsed;
+    return {
+      topics: parsed.topics,
+      feedAffinity: parsed.feedAffinity,
+      readCount: Math.max(parsed.readCount || 0, readCount),
+      starredCount: Math.max(parsed.starredCount || 0, starredCount),
+      highlightCount: Math.max(parsed.highlightCount || 0, highlightCount),
+      lastUpdated: parsed.lastUpdated || new Date().toISOString()
+    };
   } catch {
     return {
       topics: {},
       feedAffinity: {},
-      readCount: 0,
-      starredCount: 0,
-      highlightCount: 0,
+      readCount,
+      starredCount,
+      highlightCount,
       lastUpdated: new Date().toISOString()
     };
   }
@@ -122,8 +190,9 @@ export function calculateImportanceScore(params: {
   const matchedKeywords: string[] = [];
 
   for (const kw of keywords) {
-    if (profile.topics[kw]) {
-      const weight = profile.topics[kw];
+    const kwNormalized = normalizePersian(kw);
+    const weight = profile.topics[kw] || profile.topics[kwNormalized] || 0;
+    if (weight > 0) {
       tasteMatchScore += weight * 2.5;
       matchedKeywords.push(kw);
     }
@@ -191,6 +260,10 @@ export function onArticleStarred(articleId: number): void {
   const article = db.prepare('SELECT * FROM articles WHERE id = ?').get(articleId) as any;
   if (!article) return;
 
+  try {
+    db.prepare('UPDATE articles SET is_starred = 1 WHERE id = ?').run(articleId);
+  } catch {}
+
   const profile = getUserTasteProfile();
   profile.starredCount = (profile.starredCount || 0) + 1;
 
@@ -205,8 +278,40 @@ export function onArticleStarred(articleId: number): void {
   }
 
   saveUserTasteProfile(profile);
+  recalculateUnreadScores();
+}
 
-  // Recalculate scores for unread articles in the background
+/**
+ * Called when an article is un-starred: reverts user taste weights.
+ */
+export function onArticleUnstarred(articleId: number): void {
+  const article = db.prepare('SELECT * FROM articles WHERE id = ?').get(articleId) as any;
+  if (!article) return;
+
+  try {
+    db.prepare('UPDATE articles SET is_starred = 0 WHERE id = ?').run(articleId);
+  } catch {}
+
+  const profile = getUserTasteProfile();
+  profile.starredCount = Math.max(0, (profile.starredCount || 0) - 1);
+
+  // Reduce feed affinity
+  const feedKey = article.feed_id.toString();
+  if (profile.feedAffinity[feedKey]) {
+    profile.feedAffinity[feedKey] = Math.max(0, profile.feedAffinity[feedKey] - 2);
+    if (profile.feedAffinity[feedKey] === 0) delete profile.feedAffinity[feedKey];
+  }
+
+  // Reduce keywords
+  const keywords = extractKeywords(`${article.title} ${article.summary}`);
+  for (const kw of keywords) {
+    if (profile.topics[kw]) {
+      profile.topics[kw] = Math.max(0, profile.topics[kw] - 5);
+      if (profile.topics[kw] === 0) delete profile.topics[kw];
+    }
+  }
+
+  saveUserTasteProfile(profile);
   recalculateUnreadScores();
 }
 
@@ -231,11 +336,34 @@ export function onHighlightCreated(articleId: number, highlightText: string): vo
 }
 
 /**
+ * Called when a highlight is deleted: reverts highlight topic weight.
+ */
+export function onHighlightDeleted(articleId: number, highlightText: string): void {
+  const profile = getUserTasteProfile();
+  profile.highlightCount = Math.max(0, (profile.highlightCount || 0) - 1);
+
+  const keywords = extractKeywords(highlightText);
+  for (const kw of keywords) {
+    if (profile.topics[kw]) {
+      profile.topics[kw] = Math.max(0, profile.topics[kw] - 8);
+      if (profile.topics[kw] === 0) delete profile.topics[kw];
+    }
+  }
+
+  saveUserTasteProfile(profile);
+  recalculateUnreadScores();
+}
+
+/**
  * Called when an article is marked read.
  */
 export function onArticleRead(articleId: number): void {
   const article = db.prepare('SELECT * FROM articles WHERE id = ?').get(articleId) as any;
   if (!article) return;
+
+  try {
+    db.prepare('UPDATE articles SET is_read = 1 WHERE id = ?').run(articleId);
+  } catch {}
 
   const profile = getUserTasteProfile();
   profile.readCount = (profile.readCount || 0) + 1;
@@ -250,7 +378,32 @@ export function onArticleRead(articleId: number): void {
 }
 
 /**
- * Recalculates importance score for all unread articles with updated user taste.
+ * Called when an article is marked unread: reverts gentle topic boost.
+ */
+export function onArticleUnread(articleId: number): void {
+  const article = db.prepare('SELECT * FROM articles WHERE id = ?').get(articleId) as any;
+  if (!article) return;
+
+  try {
+    db.prepare('UPDATE articles SET is_read = 0 WHERE id = ?').run(articleId);
+  } catch {}
+
+  const profile = getUserTasteProfile();
+  profile.readCount = Math.max(0, (profile.readCount || 0) - 1);
+
+  const keywords = extractKeywords(article.title);
+  for (const kw of keywords) {
+    if (profile.topics[kw]) {
+      profile.topics[kw] = Math.max(0, profile.topics[kw] - 1);
+      if (profile.topics[kw] === 0) delete profile.topics[kw];
+    }
+  }
+
+  saveUserTasteProfile(profile);
+}
+
+/**
+ * Recalculates importance score for all unread articles with updated user taste and freshness.
  */
 export function recalculateUnreadScores(): void {
   try {

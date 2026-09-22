@@ -59,7 +59,7 @@ export async function generateTodayBriefing(): Promise<TodayBriefingData> {
   }
 
   // Fetch top articles from the last 48 hours, ordered by importance
-  const articles = db.prepare(`
+  let articles = db.prepare(`
     SELECT a.id, a.title, a.summary, a.full_content, a.link, a.published_at, a.importance_score, f.title as feed_title
     FROM articles a
     JOIN feeds f ON a.feed_id = f.id
@@ -67,6 +67,17 @@ export async function generateTodayBriefing(): Promise<TodayBriefingData> {
     ORDER BY a.importance_score DESC
     LIMIT 25
   `).all() as any[];
+
+  // Fallback to top recent articles overall if none found in last 48h
+  if (articles.length === 0) {
+    articles = db.prepare(`
+      SELECT a.id, a.title, a.summary, a.full_content, a.link, a.published_at, a.importance_score, f.title as feed_title
+      FROM articles a
+      JOIN feeds f ON a.feed_id = f.id
+      ORDER BY a.published_at DESC, a.importance_score DESC
+      LIMIT 25
+    `).all() as any[];
+  }
 
   if (articles.length === 0) {
     // Fallback if no articles exist yet
@@ -90,7 +101,7 @@ export async function generateTodayBriefing(): Promise<TodayBriefingData> {
 ${articles.map((a, i) => `[${i + 1}] شناسه: ${a.id} | عنوان: ${a.title} | منبع: ${a.feed_title} | خلاصه: ${a.summary?.slice(0, 180)}`).join('\n')}
 
 لطفاً بخش «امروز چه خبر» را به زبان فارسی روان، شیوا و ساختاریافته تولید کنید.
-خروجی باید دقیقاً و صرفاً یک شیء JSON با ساختار زیر باشد (بدون markdown code block و بدون هیچ متن اضافه):
+خروجی باید دقیقاً و صرفاً یک شیء JSON با ساختار زیر باشد (بدون هیچ توضیح اضافه و ترجیحاً بدون markdown):
 
 {
   "date": "${todayStr}",
@@ -112,17 +123,16 @@ ${articles.map((a, i) => `[${i + 1}] شناسه: ${a.id} | عنوان: ${a.title
 }
 `;
 
-      const response = await client.interactions.create({
-        model: 'gemini-3.8-flash',
-        input: prompt
+      const response = await client.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt
       });
 
-      const rawOutput = response.output_text || '';
-      const cleanJson = rawOutput.replace(/```json/g, '').replace(/```/g, '').trim();
-      const parsedData = JSON.parse(cleanJson);
+      const rawOutput = response.text || '';
+      const parsedData = extractJsonFromText(rawOutput);
 
       // Hydrate article details
-      for (const cat of parsedData.categories) {
+      for (const cat of parsedData.categories || []) {
         cat.articles = (cat.articleIds || [])
           .map((aid: number) => articles.find(a => a.id === aid))
           .filter(Boolean)
@@ -149,6 +159,22 @@ ${articles.map((a, i) => `[${i + 1}] شناسه: ${a.id} | عنوان: ${a.title
 
   // Local Rule-Based & NLP Fallback Synthesizer
   return generateLocalNLPBriefing(todayStr, articles);
+}
+
+/**
+ * Safely extracts a JSON object from text even if wrapped with markdown or commentary.
+ */
+function extractJsonFromText(text: string): any {
+  const clean = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+  try {
+    return JSON.parse(clean);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) {
+      return JSON.parse(match[0]);
+    }
+    throw new Error('Could not parse JSON from response');
+  }
 }
 
 /**
@@ -268,12 +294,12 @@ export async function generateArticleSummary(articleId: number): Promise<string>
 متن:
 ${textContent.slice(0, 4000)}
 `;
-      const response = await client.interactions.create({
-        model: 'gemini-3.8-flash',
-        input: prompt
+      const response = await client.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt
       });
 
-      const summary = response.output_text?.trim() || '';
+      const summary = response.text?.trim() || '';
       if (summary) {
         db.prepare('UPDATE articles SET ai_summary = ? WHERE id = ?').run(summary, articleId);
         return summary;

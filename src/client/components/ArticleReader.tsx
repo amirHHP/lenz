@@ -26,6 +26,7 @@ interface Props {
   onPrev: () => void;
   onToggleStar: (articleId: number, current: boolean) => void;
   onToggleRead: (articleId: number, current: boolean) => void;
+  onHighlightCreated?: () => void;
   isZenMode: boolean;
   onToggleZen: () => void;
 }
@@ -36,6 +37,7 @@ export const ArticleReader: React.FC<Props> = ({
   onPrev,
   onToggleStar,
   onToggleRead,
+  onHighlightCreated,
   isZenMode,
   onToggleZen
 }) => {
@@ -53,7 +55,8 @@ export const ArticleReader: React.FC<Props> = ({
     top: number;
     left: number;
   } | null>(null);
-  const [selectedColor, setSelectedColor] = useState<'yellow' | 'green' | 'blue'>('yellow');
+  const [showNoteInput, setShowNoteInput] = useState(false);
+  const [noteText, setNoteText] = useState('');
 
   const contentRef = useRef<HTMLDivElement>(null);
 
@@ -68,6 +71,9 @@ export const ArticleReader: React.FC<Props> = ({
     let isMounted = true;
     setLoading(true);
     setAiSummary(null);
+    setSelectionRange(null);
+    setShowNoteInput(false);
+    setNoteText('');
 
     fetch(`/api/articles/${articleId}`)
       .then(res => res.json())
@@ -94,13 +100,16 @@ export const ArticleReader: React.FC<Props> = ({
     function handleSelectionChange() {
       const selection = window.getSelection();
       if (!selection || selection.isCollapsed || !selection.toString().trim()) {
-        setSelectionRange(null);
+        // If note input is currently open, don't clear immediately
+        if (!showNoteInput) {
+          setSelectionRange(null);
+        }
         return;
       }
 
       const text = selection.toString().trim();
-      if (text.length < 3) {
-        setSelectionRange(null);
+      if (text.length < 2) {
+        if (!showNoteInput) setSelectionRange(null);
         return;
       }
 
@@ -118,15 +127,15 @@ export const ArticleReader: React.FC<Props> = ({
           // ignore
         }
       } else {
-        setSelectionRange(null);
+        if (!showNoteInput) setSelectionRange(null);
       }
     }
 
     document.addEventListener('selectionchange', handleSelectionChange);
     return () => document.removeEventListener('selectionchange', handleSelectionChange);
-  }, []);
+  }, [showNoteInput]);
 
-  async function handleCreateHighlight(color: 'yellow' | 'green' | 'blue') {
+  async function handleCreateHighlight(color: 'yellow' | 'green' | 'blue' = 'yellow', note?: string) {
     if (!article || !selectionRange) return;
 
     try {
@@ -136,6 +145,7 @@ export const ArticleReader: React.FC<Props> = ({
         body: JSON.stringify({
           articleId: article.id,
           text: selectionRange.text,
+          note: note || (noteText.trim() ? noteText.trim() : null),
           color
         })
       });
@@ -143,11 +153,42 @@ export const ArticleReader: React.FC<Props> = ({
       if (res.ok) {
         setHighlights(prev => [...prev, data]);
         setSelectionRange(null);
+        setShowNoteInput(false);
+        setNoteText('');
         window.getSelection()?.removeAllRanges();
+        onHighlightCreated?.();
       }
     } catch (err) {
       console.error(err);
     }
+  }
+
+  // Keyboard shortcut 'h' to highlight selected text
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+      if ((e.code === 'KeyH' || e.key === 'h' || e.key === 'H' || e.key === 'ا') && selectionRange) {
+        e.preventDefault();
+        handleCreateHighlight('yellow');
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectionRange, article]);
+
+  function handleToggleStarLocal() {
+    if (!article) return;
+    const current = article.is_starred === 1;
+    setArticle(prev => prev ? { ...prev, is_starred: current ? 0 : 1 } : null);
+    onToggleStar(article.id, current);
+  }
+
+  function handleToggleReadLocal() {
+    if (!article) return;
+    const current = article.is_read === 1;
+    setArticle(prev => prev ? { ...prev, is_read: current ? 0 : 1 } : null);
+    onToggleRead(article.id, current);
   }
 
   async function handleForceExtract() {
@@ -218,12 +259,16 @@ export const ArticleReader: React.FC<Props> = ({
   const rawHtml = article.full_content || article.summary || '';
   let processedHtml = rawHtml;
 
-  // Apply highlights to HTML text safely
+  // Apply highlights to HTML text safely without corrupting HTML tags or attributes
   highlights.forEach(h => {
+    if (!h.text || !h.text.trim()) return;
     try {
-      const escaped = h.text.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-      const regex = new RegExp(`(${escaped})`, 'gi');
-      processedHtml = processedHtml.replace(regex, `<mark class="lenz-highlight-${h.color}">$1</mark>`);
+      const escaped = h.text.trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+      const regex = new RegExp(`(<[^>]+>)|(${escaped})`, 'gi');
+      processedHtml = processedHtml.replace(regex, (match, tag, textMatch) => {
+        if (tag) return tag;
+        return `<mark class="lenz-highlight-${h.color || 'yellow'}">${textMatch}</mark>`;
+      });
     } catch {
       // ignore
     }
@@ -252,25 +297,58 @@ export const ArticleReader: React.FC<Props> = ({
       {/* Top Floating Selection Popover for Highlighting */}
       {selectionRange && (
         <div
+          onMouseDown={e => e.preventDefault()}
           style={{ top: `${Math.max(10, selectionRange.top)}px`, left: `${selectionRange.left}px` }}
-          className="fixed -translate-x-1/2 z-50 flex items-center gap-1.5 p-1 bg-zinc-900 dark:bg-zinc-800 text-white rounded-xl shadow-2xl border border-zinc-700 animate-in fade-in duration-100"
+          className="fixed -translate-x-1/2 z-50 flex flex-col p-1.5 bg-zinc-900 dark:bg-zinc-800 text-white rounded-xl shadow-2xl border border-zinc-700 animate-in fade-in duration-100"
         >
-          <span className="text-[11px] font-semibold px-2 text-zinc-300">هایلایت:</span>
-          <button
-            onClick={() => handleCreateHighlight('yellow')}
-            className="w-5 h-5 rounded-full bg-amber-400 hover:scale-110 transition-transform"
-            title="هایلایت زرد"
-          />
-          <button
-            onClick={() => handleCreateHighlight('green')}
-            className="w-5 h-5 rounded-full bg-emerald-400 hover:scale-110 transition-transform"
-            title="هایلایت سبز"
-          />
-          <button
-            onClick={() => handleCreateHighlight('blue')}
-            className="w-5 h-5 rounded-full bg-blue-400 hover:scale-110 transition-transform"
-            title="هایلایت آبی"
-          />
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] font-semibold px-1.5 text-zinc-300">هایلایت:</span>
+            <button
+              onClick={() => handleCreateHighlight('yellow')}
+              className="w-5 h-5 rounded-full bg-amber-400 hover:scale-110 transition-transform"
+              title="هایلایت زرد (کلید h)"
+            />
+            <button
+              onClick={() => handleCreateHighlight('green')}
+              className="w-5 h-5 rounded-full bg-emerald-400 hover:scale-110 transition-transform"
+              title="هایلایت سبز"
+            />
+            <button
+              onClick={() => handleCreateHighlight('blue')}
+              className="w-5 h-5 rounded-full bg-blue-400 hover:scale-110 transition-transform"
+              title="هایلایت آبی"
+            />
+            <button
+              onClick={() => setShowNoteInput(prev => !prev)}
+              className="text-[10px] text-zinc-300 hover:text-white px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 transition-colors mr-1"
+            >
+              {showNoteInput ? 'بستن یادداشت' : '+ یادداشت'}
+            </button>
+          </div>
+          {showNoteInput && (
+            <div className="mt-2 pt-2 border-t border-zinc-700/80 flex items-center gap-1">
+              <input
+                type="text"
+                placeholder="یادداشت برای این هایلایت..."
+                value={noteText}
+                onChange={e => setNoteText(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleCreateHighlight('yellow', noteText);
+                  }
+                }}
+                className="px-2 py-1 text-xs bg-zinc-800 text-zinc-100 placeholder-zinc-400 rounded border border-zinc-700 focus:outline-hidden focus:border-blue-500 w-48"
+                autoFocus
+              />
+              <button
+                onClick={() => handleCreateHighlight('yellow', noteText)}
+                className="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded font-medium"
+              >
+                ثبت
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -296,7 +374,7 @@ export const ArticleReader: React.FC<Props> = ({
 
           {/* Star toggle */}
           <button
-            onClick={() => onToggleStar(article.id, article.is_starred === 1)}
+            onClick={handleToggleStarLocal}
             title="ستاره‌دار کردن (s)"
             className={`p-1.5 rounded-lg transition-colors ${
               article.is_starred === 1
@@ -309,7 +387,7 @@ export const ArticleReader: React.FC<Props> = ({
 
           {/* Read toggle */}
           <button
-            onClick={() => onToggleRead(article.id, article.is_read === 1)}
+            onClick={handleToggleReadLocal}
             title="تغییر وضعیت خوانده‌شده (m)"
             className={`p-1.5 rounded-lg transition-colors ${
               article.is_read === 1

@@ -9,6 +9,16 @@ interface Props {
   onSubscribed: () => void;
 }
 
+function safeDomain(urlStr?: string): string {
+  if (!urlStr) return '';
+  try {
+    const formatted = urlStr.startsWith('http://') || urlStr.startsWith('https://') ? urlStr : `https://${urlStr}`;
+    return new URL(formatted).hostname;
+  } catch {
+    return '';
+  }
+}
+
 export const DirectoryModal: React.FC<Props> = ({ isOpen, onClose, folders, onSubscribed }) => {
   const [directory, setDirectory] = useState<DirectoryFeed[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
@@ -106,63 +116,66 @@ export const DirectoryModal: React.FC<Props> = ({ isOpen, onClose, folders, onSu
 
         {/* Catalog Grid */}
         <div className="p-6 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-4">
-          {filtered.map(item => (
-            <div
-              key={item.id}
-              className="p-4 rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-800/30 hover:border-zinc-300 dark:hover:border-zinc-700 transition-all flex flex-col justify-between"
-            >
-              <div>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-2.5">
-                    <img
-                      src={`https://www.google.com/s2/favicons?domain=${new URL(item.siteUrl).hostname}&sz=32`}
-                      alt={item.title}
-                      className="w-6 h-6 rounded-md shrink-0 bg-white"
-                      onError={e => {
-                        (e.target as HTMLElement).style.display = 'none';
-                      }}
-                    />
-                    <div>
-                      <h3 className="text-sm font-bold text-zinc-900 dark:text-zinc-100">{item.title}</h3>
-                      <span className="text-[11px] text-zinc-400">{new URL(item.siteUrl).hostname}</span>
+          {filtered.map(item => {
+            const domain = safeDomain(item.siteUrl);
+            return (
+              <div
+                key={item.id}
+                className="p-4 rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-800/30 hover:border-zinc-300 dark:hover:border-zinc-700 transition-all flex flex-col justify-between"
+              >
+                <div>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-2.5">
+                      <img
+                        src={domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=32` : '/favicon.ico'}
+                        alt={item.title}
+                        className="w-6 h-6 rounded-md shrink-0 bg-white"
+                        onError={e => {
+                          (e.target as HTMLElement).style.display = 'none';
+                        }}
+                      />
+                      <div>
+                        <h3 className="text-sm font-bold text-zinc-900 dark:text-zinc-100">{item.title}</h3>
+                        <span className="text-[11px] text-zinc-400">{domain || item.siteUrl}</span>
+                      </div>
                     </div>
+                    <span className="px-2 py-0.5 text-[10px] font-medium bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 rounded-full border border-blue-100 dark:border-blue-900/40">
+                      {item.category}
+                    </span>
                   </div>
-                  <span className="px-2 py-0.5 text-[10px] font-medium bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 rounded-full border border-blue-100 dark:border-blue-900/40">
-                    {item.category}
-                  </span>
+                  <p className="mt-2.5 text-xs text-zinc-600 dark:text-zinc-400 line-clamp-2 leading-relaxed">
+                    {item.description}
+                  </p>
                 </div>
-                <p className="mt-2.5 text-xs text-zinc-600 dark:text-zinc-400 line-clamp-2 leading-relaxed">
-                  {item.description}
-                </p>
-              </div>
 
-              <div className="mt-4 pt-3 border-t border-zinc-200/50 dark:border-zinc-800 flex items-center justify-between">
-                <a
-                  href={item.siteUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-[11px] text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 underline underline-offset-2"
-                >
-                  مشاهده وب‌سایت
-                </a>
-
-                {item.isSubscribed ? (
-                  <span className="flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400 px-3 py-1 bg-emerald-50 dark:bg-emerald-950/40 rounded-lg">
-                    <Check className="w-3.5 h-3.5" /> سابسکرایب شده
-                  </span>
-                ) : (
-                  <button
-                    onClick={() => handleSubscribe(item)}
-                    disabled={subscribingId === item.id}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-blue-600 dark:hover:bg-blue-500 dark:hover:text-white rounded-lg transition-colors shadow-xs"
+                <div className="mt-4 pt-3 border-t border-zinc-200/50 dark:border-zinc-800 flex items-center justify-between">
+                  <a
+                    href={item.siteUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[11px] text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 underline underline-offset-2"
                   >
-                    <Plus className="w-3.5 h-3.5" />
-                    {subscribingId === item.id ? 'در حال ثبت...' : 'سابسکرایب'}
-                  </button>
-                )}
+                    مشاهده وب‌سایت
+                  </a>
+
+                  {item.isSubscribed ? (
+                    <span className="flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400 px-3 py-1 bg-emerald-50 dark:bg-emerald-950/40 rounded-lg">
+                      <Check className="w-3.5 h-3.5" /> سابسکرایب شده
+                    </span>
+                  ) : (
+                    <button
+                      onClick={() => handleSubscribe(item)}
+                      disabled={subscribingId === item.id}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-blue-600 dark:hover:bg-blue-500 dark:hover:text-white rounded-lg transition-colors shadow-xs"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      {subscribingId === item.id ? 'در حال ثبت...' : 'سابسکرایب'}
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>

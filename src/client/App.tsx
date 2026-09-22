@@ -126,22 +126,63 @@ export const App: React.FC = () => {
       setActiveView({ type: 'all' });
     }
 
-    const art = articles.find(a => a.id === articleId);
-    if (art && art.is_read === 0) {
-      try {
-        await fetch(`/api/articles/${articleId}/read`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ isRead: true })
-        });
-        setArticles(prev => prev.map(a => a.id === articleId ? { ...a, is_read: 1 } : a));
-        setStats(prev => ({ ...prev, unread_total: Math.max(0, prev.unread_total - 1) }));
-        loadSidebarData();
-      } catch (err) {
-        console.error(err);
-      }
+    try {
+      await fetch(`/api/articles/${articleId}/read`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isRead: true })
+      });
+      setArticles(prev => prev.map(a => a.id === articleId ? { ...a, is_read: 1 } : a));
+      setStats(prev => ({ ...prev, unread_total: Math.max(0, prev.unread_total - 1) }));
+      loadSidebarData();
+    } catch (err) {
+      console.error(err);
     }
-  }, [articles, activeView, loadSidebarData]);
+  }, [activeView, loadSidebarData]);
+
+  // Highlight callbacks
+  const handleHighlightCreated = useCallback(() => {
+    setStats(prev => ({ ...prev, highlights_total: prev.highlights_total + 1 }));
+    if (selectedArticleId) {
+      setArticles(prev => prev.map(a => a.id === selectedArticleId ? {
+        ...a,
+        highlight_count: (a.highlight_count || 0) + 1
+      } : a));
+    }
+  }, [selectedArticleId]);
+
+  const handleHighlightDeleted = useCallback(() => {
+    setStats(prev => ({ ...prev, highlights_total: Math.max(0, prev.highlights_total - 1) }));
+    loadArticles();
+  }, [loadArticles]);
+
+  // Update feed folder or title
+  const handleUpdateFeed = useCallback(async (feedId: number, folderId: number | null, title?: string) => {
+    try {
+      await fetch(`/api/feeds/${feedId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderId, title })
+      });
+      await Promise.all([loadSidebarData(), loadArticles()]);
+    } catch (err) {
+      console.error(err);
+    }
+  }, [loadSidebarData, loadArticles]);
+
+  // Delete folder
+  const handleDeleteFolder = useCallback(async (folderId: number) => {
+    if (!confirm('آیا از حذف این پوشه اطمینان دارید؟ فیدهای داخل آن به بخش بدون پوشه منتقل می‌شوند.')) return;
+    try {
+      await fetch(`/api/folders/${folderId}`, { method: 'DELETE' });
+      if (activeView.type === 'folder' && activeView.folderId === folderId) {
+        setActiveView({ type: 'all' });
+      }
+      await Promise.all([loadSidebarData(), loadArticles()]);
+    } catch (err) {
+      console.error(err);
+    }
+  }, [activeView, loadSidebarData, loadArticles]);
 
   // Star toggle
   const handleToggleStar = useCallback(async (articleId: number, current: boolean) => {
@@ -220,6 +261,9 @@ export const App: React.FC = () => {
     if (!confirm('آیا از حذف این فید اطمینان دارید؟')) return;
     try {
       await fetch(`/api/feeds/${feedId}`, { method: 'DELETE' });
+      if (activeView.type === 'feed' && activeView.feedId === feedId) {
+        setActiveView({ type: 'all' });
+      }
       await Promise.all([loadSidebarData(), loadArticles()]);
     } catch (err) {
       console.error(err);
@@ -292,6 +336,7 @@ export const App: React.FC = () => {
     onPrev: handlePrevArticle,
     onStar: handleStarCurrent,
     onRead: handleReadCurrent,
+    onZenToggle: () => setIsZenMode(prev => !prev),
     onSearchFocus: handleSearchFocus,
     onHelp: () => setIsShortcutsOpen(prev => !prev),
     onEscape: handleEscape
@@ -318,6 +363,8 @@ export const App: React.FC = () => {
           onOpenShortcuts={() => setIsShortcutsOpen(true)}
           onOpenSettings={() => setIsSettingsOpen(true)}
           onDeleteFeed={handleDeleteFeed}
+          onUpdateFeed={handleUpdateFeed}
+          onDeleteFolder={handleDeleteFolder}
         />
       )}
 
@@ -325,7 +372,10 @@ export const App: React.FC = () => {
       {activeView.type === 'briefing' ? (
         <TodayBriefing onSelectArticle={handleSelectArticle} />
       ) : activeView.type === 'highlights' ? (
-        <HighlightsView onSelectArticle={handleSelectArticle} />
+        <HighlightsView
+          onSelectArticle={handleSelectArticle}
+          onDeleteHighlight={handleHighlightDeleted}
+        />
       ) : (
         <div className="flex-1 flex h-full overflow-hidden">
           {/* Middle Article List (hidden in Zen mode) */}
@@ -355,6 +405,7 @@ export const App: React.FC = () => {
             onPrev={handlePrevArticle}
             onToggleStar={handleToggleStar}
             onToggleRead={handleToggleRead}
+            onHighlightCreated={handleHighlightCreated}
             isZenMode={isZenMode}
             onToggleZen={() => setIsZenMode(prev => !prev)}
           />
