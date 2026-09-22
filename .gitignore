@@ -141,3 +141,13 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+dist/
+
+# Lenz runtime data
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+
