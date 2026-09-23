@@ -15,27 +15,133 @@ db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
 export function initDatabase() {
+  // 1. Users and Sessions tables
   db.exec(`
-    CREATE TABLE IF NOT EXISTS folders (
+    CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL UNIQUE,
-      icon TEXT DEFAULT 'folder',
-      order_index INTEGER DEFAULT 0,
+      username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      password_hash TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      email TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
-    CREATE TABLE IF NOT EXISTS feeds (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL,
-      title TEXT NOT NULL,
-      url TEXT NOT NULL UNIQUE,
-      site_url TEXT,
-      description TEXT,
-      icon_url TEXT,
-      last_fetched_at DATETIME,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    CREATE TABLE IF NOT EXISTS sessions (
+      token TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      expires_at DATETIME NOT NULL
     );
 
+    CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
+  `);
+
+  // Ensure default user 1 exists ('admin' / 'admin123')
+  const defaultUser = db.prepare('SELECT id FROM users WHERE id = 1').get();
+  if (!defaultUser) {
+    db.prepare(`
+      INSERT OR IGNORE INTO users (id, username, password_hash, display_name)
+      VALUES (1, 'admin', 'a1b2c3d4e5f60718:1e0f48709b7135e2cae4d2acde0b81b43e887848dcc5dda72655afb549b19319', 'مدیر سیستم')
+    `).run();
+  }
+
+  // 2. Folders table & migration to per-user UNIQUE(user_id, name)
+  const foldersCheck = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='folders'").get();
+  if (!foldersCheck) {
+    db.exec(`
+      CREATE TABLE folders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        icon TEXT DEFAULT 'folder',
+        order_index INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, name)
+      );
+      CREATE INDEX IF NOT EXISTS idx_folders_user_id ON folders(user_id);
+    `);
+  } else {
+    const folderCols = db.prepare("PRAGMA table_info(folders)").all() as any[];
+    const hasFolderUserId = folderCols.some(c => c.name === 'user_id');
+    const folderSql = ((db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='folders'").get() as any)?.sql || '').toLowerCase();
+    const hasGlobalFolderUnique = folderSql.includes('name text not null unique') || folderSql.includes('unique (name)') || folderSql.includes('unique(name)');
+
+    if (!hasFolderUserId || hasGlobalFolderUnique) {
+      db.pragma('foreign_keys = OFF');
+      db.exec(`
+        CREATE TABLE folders_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          icon TEXT DEFAULT 'folder',
+          order_index INTEGER DEFAULT 0,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(user_id, name)
+        );
+        INSERT OR IGNORE INTO folders_new (id, user_id, name, icon, order_index, created_at)
+        SELECT id, ${hasFolderUserId ? 'COALESCE(user_id, 1)' : '1'}, name, icon, order_index, created_at FROM folders;
+        DROP TABLE folders;
+        ALTER TABLE folders_new RENAME TO folders;
+        CREATE INDEX IF NOT EXISTS idx_folders_user_id ON folders(user_id);
+      `);
+      db.pragma('foreign_keys = ON');
+    }
+  }
+
+  // 3. Feeds table & migration to per-user UNIQUE(user_id, url)
+  const feedsCheck = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='feeds'").get();
+  if (!feedsCheck) {
+    db.exec(`
+      CREATE TABLE feeds (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id) ON DELETE CASCADE,
+        folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL,
+        title TEXT NOT NULL,
+        url TEXT NOT NULL,
+        site_url TEXT,
+        description TEXT,
+        icon_url TEXT,
+        last_fetched_at DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, url)
+      );
+      CREATE INDEX IF NOT EXISTS idx_feeds_user_id ON feeds(user_id);
+    `);
+  } else {
+    const feedCols = db.prepare("PRAGMA table_info(feeds)").all() as any[];
+    const hasFeedUserId = feedCols.some(c => c.name === 'user_id');
+    const feedSql = ((db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='feeds'").get() as any)?.sql || '').toLowerCase();
+    const hasGlobalFeedUnique = feedSql.includes('url text not null unique') || feedSql.includes('unique (url)') || feedSql.includes('unique(url)');
+
+    if (!hasFeedUserId || hasGlobalFeedUnique) {
+      db.pragma('foreign_keys = OFF');
+      db.exec(`
+        CREATE TABLE feeds_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id) ON DELETE CASCADE,
+          folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL,
+          title TEXT NOT NULL,
+          url TEXT NOT NULL,
+          site_url TEXT,
+          description TEXT,
+          icon_url TEXT,
+          last_fetched_at DATETIME,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(user_id, url)
+        );
+        INSERT OR IGNORE INTO feeds_new (id, user_id, folder_id, title, url, site_url, description, icon_url, last_fetched_at, created_at)
+        SELECT id, ${hasFeedUserId ? 'COALESCE(user_id, 1)' : '1'}, folder_id, title, url, site_url, description, icon_url, last_fetched_at, created_at FROM feeds;
+        DROP TABLE feeds;
+        ALTER TABLE feeds_new RENAME TO feeds;
+        CREATE INDEX IF NOT EXISTS idx_feeds_user_id ON feeds(user_id);
+      `);
+      db.pragma('foreign_keys = ON');
+    }
+  }
+
+  // 4. Articles, highlights, user_profile, briefings, telegram_subscriptions
+  db.exec(`
     CREATE TABLE IF NOT EXISTS articles (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
@@ -82,7 +188,8 @@ export function initDatabase() {
 
     CREATE TABLE IF NOT EXISTS briefings (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      date TEXT NOT NULL UNIQUE,
+      user_id INTEGER DEFAULT 1,
+      date TEXT NOT NULL,
       title TEXT NOT NULL,
       content_json TEXT NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -90,6 +197,7 @@ export function initDatabase() {
 
     CREATE TABLE IF NOT EXISTS telegram_subscriptions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER DEFAULT 1,
       chat_id TEXT NOT NULL UNIQUE,
       username TEXT,
       first_name TEXT,
@@ -108,21 +216,27 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_telegram_chat_id ON telegram_subscriptions(chat_id);
   `);
 
-  // Migration: ensure is_full_extracted column exists on existing articles table
+  // Ensure is_full_extracted column
   try {
     db.exec('ALTER TABLE articles ADD COLUMN is_full_extracted INTEGER DEFAULT 0');
-  } catch {
-    // Column already exists
-  }
+  } catch {}
 
-  // Migration: ensure last_sent_slot column exists on telegram_subscriptions
+  // Ensure last_sent_slot column
   try {
     db.exec('ALTER TABLE telegram_subscriptions ADD COLUMN last_sent_slot TEXT');
-  } catch {
-    // Column already exists
-  }
+  } catch {}
 
-  // Seed or ensure default folders exist for all curated categories
+  // Ensure user_id column on telegram_subscriptions
+  try {
+    db.exec('ALTER TABLE telegram_subscriptions ADD COLUMN user_id INTEGER DEFAULT 1');
+  } catch {}
+
+  // Ensure user_id column on briefings
+  try {
+    db.exec('ALTER TABLE briefings ADD COLUMN user_id INTEGER DEFAULT 1');
+  } catch {}
+
+  // Seed default folders for user 1
   const defaultFolders = [
     { name: 'فناوری و استارتاپ', icon: 'cpu', order: 0 },
     { name: 'هوش مصنوعی و داده', icon: 'sparkles', order: 1 },
@@ -136,12 +250,12 @@ export function initDatabase() {
     { name: 'سبک زندگی، فرهنگ و یادگیری', icon: 'sun', order: 9 }
   ];
 
-  const insertFolder = db.prepare('INSERT OR IGNORE INTO folders (name, icon, order_index) VALUES (?, ?, ?)');
+  const insertFolder = db.prepare('INSERT OR IGNORE INTO folders (user_id, name, icon, order_index) VALUES (1, ?, ?, ?)');
   for (const f of defaultFolders) {
     insertFolder.run(f.name, f.icon, f.order);
   }
 
-  // Initialize taste profile if empty
+  // Initialize taste profile if empty for user 1
   const tasteProfile = db.prepare('SELECT value FROM user_profile WHERE key = ?').get('taste_profile');
   if (!tasteProfile) {
     db.prepare('INSERT INTO user_profile (key, value) VALUES (?, ?)').run(

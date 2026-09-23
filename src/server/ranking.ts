@@ -100,7 +100,7 @@ export function extractKeywords(text: string): string[] {
 /**
  * Retrieves the current user taste profile from SQLite, synchronizing live counters.
  */
-export function getUserTasteProfile(): UserTasteProfile {
+export function getUserTasteProfile(userId: number = 1): UserTasteProfile {
   let readCount = 0;
   let starredCount = 0;
   let highlightCount = 0;
@@ -108,10 +108,10 @@ export function getUserTasteProfile(): UserTasteProfile {
   try {
     const counts = db.prepare(`
       SELECT 
-        (SELECT COUNT(*) FROM articles WHERE is_read = 1) as readCount,
-        (SELECT COUNT(*) FROM articles WHERE is_starred = 1) as starredCount,
-        (SELECT COUNT(*) FROM highlights) as highlightCount
-    `).get() as any;
+        (SELECT COUNT(*) FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE f.user_id = ? AND a.is_read = 1) as readCount,
+        (SELECT COUNT(*) FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE f.user_id = ? AND a.is_starred = 1) as starredCount,
+        (SELECT COUNT(*) FROM highlights h JOIN articles a ON h.article_id = a.id JOIN feeds f ON a.feed_id = f.id WHERE f.user_id = ?) as highlightCount
+    `).get(userId, userId, userId) as any;
     if (counts) {
       readCount = counts.readCount || 0;
       starredCount = counts.starredCount || 0;
@@ -121,7 +121,8 @@ export function getUserTasteProfile(): UserTasteProfile {
     // fallback if DB not fully initialized
   }
 
-  const row = db.prepare('SELECT value FROM user_profile WHERE key = ?').get('taste_profile') as { value: string } | undefined;
+  const profileKey = userId === 1 ? 'taste_profile' : `taste_profile_${userId}`;
+  const row = db.prepare('SELECT value FROM user_profile WHERE key = ?').get(profileKey) as { value: string } | undefined;
   if (!row) {
     return {
       topics: {},
@@ -159,12 +160,13 @@ export function getUserTasteProfile(): UserTasteProfile {
 /**
  * Saves updated taste profile to SQLite.
  */
-export function saveUserTasteProfile(profile: UserTasteProfile): void {
+export function saveUserTasteProfile(profile: UserTasteProfile, userId: number = 1): void {
   profile.lastUpdated = new Date().toISOString();
+  const profileKey = userId === 1 ? 'taste_profile' : `taste_profile_${userId}`;
   db.prepare(`
-    INSERT INTO user_profile (key, value) VALUES ('taste_profile', ?)
+    INSERT INTO user_profile (key, value) VALUES (?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
-  `).run(JSON.stringify(profile));
+  `).run(profileKey, JSON.stringify(profile));
 }
 
 /**
@@ -179,7 +181,12 @@ export function calculateImportanceScore(params: {
   feedId: number;
   categories?: string[];
 }): ImportanceResult {
-  const profile = getUserTasteProfile();
+  let userId = 1;
+  try {
+    const feedRow = db.prepare('SELECT user_id FROM feeds WHERE id = ?').get(params.feedId) as any;
+    if (feedRow && feedRow.user_id) userId = feedRow.user_id;
+  } catch {}
+  const profile = getUserTasteProfile(userId);
   const reasons: string[] = [];
 
   // 1. User Taste Alignment (0 - 45 points)
