@@ -10,4 +10,4 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "lenz-db"
-database_id = "lenz-db-local"
+# database_id = "" # Set via D1_DATABASE_ID env var or paste D1 UUID. When omitted, Wrangler resolves "lenz-db" or inherits dashboard bindings.

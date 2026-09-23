@@ -72,3 +72,50 @@ npm run build
 پس از اجرای `npm run dev`:
 - فرانت‌اند روی `http://localhost:3000` در دسترس است.
 - سرور API روی `http://localhost:3001` اجرا می‌شود.
+
+---
+
+## ⛅️ استقرار روی Cloudflare (Workers with Assets & D1)
+
+این پروژه از معماری مدرن Cloudflare Workers با Static Assets و دیتابیس D1 پشتیبانی می‌کند.
+
+### مراحل راه‌اندازی و دیپلوی:
+
+1. **ورود به حساب Cloudflare:**
+   ```bash
+   npx wrangler login
+   ```
+
+2. **ایجاد دیتابیس D1:**
+   ```bash
+   npm run d1:create
+   ```
+   یا از طریق داشبورد کلودفلر: **Storage & Databases** > **D1 SQL Database** > ایجاد دیتابیس با نام `lenz-db`.
+
+3. **تنظیم شناسه دیتابیس (`database_id`):**
+   - **روش اول (توصیه‌شده برای گیت/CI):** متغیر محیطی `D1_DATABASE_ID` را در داشبورد کلودفلر (**Workers & Pages** > **lenz** > **Settings** > **Variables and Secrets**) با مقدار UUID دیتابیس خود تنظیم کنید. اسکریپت بیلد پروژه آن را به طور خودکار به `wrangler.toml` تزریق می‌کند.
+   - **روش دوم (تنظیم دستی در فایل):** شناسه UUID دیتابیس را مستقیماً در فایل `wrangler.toml` قرار دهید:
+     ```toml
+     [[d1_databases]]
+     binding = "DB"
+     database_name = "lenz-db"
+     database_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+     ```
+   - **روش سوم (اتصال خودکار یا ارث‌بری از داشبورد):** اگر دیتابیسی با نام `lenz-db` در کلودفلر ساخته‌اید یا در داشبورد بایندینگ `DB` را متصل کرده‌اید، می‌توانید خط `database_id` را کامنت یا خالی بگذارید تا Wrangler به صورت خودکار آن را متصل کند.
+   > ⚠️ **نکته بسیار مهم:** هرگز مقادیر تستی مانند `"lenz-db-local"` یا مقادیر غیر UUID را در `database_id` قرار ندهید؛ این کار باعث بروز خطای اعتبارسنجی `code: 10021` در کلودفلر می‌شود.
+
+4. **اعمال ساختار جداول دیتابیس به سرور کلودفلر (Remote Migration):**
+   ```bash
+   npm run d1:migrate:remote
+   ```
+
+5. **تست لوکال محیط Worker و D1:**
+   ```bash
+   npm run worker:dev
+   ```
+
+6. **دیپلوی به Cloudflare:**
+   ```bash
+   npm run deploy
+   ```
+

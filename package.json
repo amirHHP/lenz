@@ -7,10 +7,12 @@
     "dev": "concurrently -n \"server,client\" -c \"blue,green\" \"tsx watch src/server/index.ts\" \"vite\"",
     "dev:server": "tsx watch src/server/index.ts",
     "dev:client": "vite",
-    "build": "vite build",
+    "build": "node scripts/prepare-d1.js && vite build",
     "start": "NODE_ENV=production tsx src/server/index.ts",
     "test": "vitest run",
+    "worker:dev": "wrangler dev worker/index.ts",
     "pages:dev": "npm run build && wrangler pages dev dist --d1=DB --compatibility-flag=nodejs_compat",
+    "d1:create": "wrangler d1 create lenz-db",
     "d1:migrate:local": "wrangler d1 execute lenz-db --local --file=./migrations/0001_initial_schema.sql",
     "d1:migrate:remote": "wrangler d1 execute lenz-db --remote --file=./migrations/0001_initial_schema.sql",
     "deploy": "npm run build && wrangler deploy worker/index.ts --assets=./dist"

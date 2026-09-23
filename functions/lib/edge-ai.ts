@@ -83,7 +83,7 @@ export async function generateTodayBriefingInD1(db: D1Database, env?: any): Prom
 شما هوش مصنوعی دستیار خبری پیشرفته نرم‌افزار Lenz هستید.
 لیست ۲۵ خبر مهم زیر به همراه منبع و خلاصه در اختیار شماست:
 
-${articles.map((a, i) => `[${i + 1}] شناسه: ${a.id} | عنوان: ${a.title} | منبع: ${a.feed_title} | خلاصه: ${a.summary?.slice(0, 180)}`).join('\n')}
+${articles.map((a: any, i: number) => `[${i + 1}] شناسه: ${a.id} | عنوان: ${a.title} | منبع: ${a.feed_title} | خلاصه: ${a.summary?.slice(0, 180)}`).join('\n')}
 
 لطفاً بخش «امروز چه خبر» را به زبان فارسی روان، شیوا و ساختاریافته تولید کنید.
 خروجی باید دقیقاً و صرفاً یک شیء JSON با ساختار زیر باشد (بدون هیچ توضیح اضافه و ترجیحاً بدون markdown):
@@ -130,7 +130,7 @@ ${articles.map((a, i) => `[${i + 1}] شناسه: ${a.id} | عنوان: ${a.title
           const parsedData = extractJsonFromText(textOut);
           for (const cat of parsedData.categories || []) {
             cat.articles = (cat.articleIds || [])
-              .map((aid: number) => articles.find(a => a.id === aid))
+              .map((aid: number) => articles.find((a: any) => a.id === aid))
               .filter(Boolean)
               .map((a: any) => ({
                 id: a.id,

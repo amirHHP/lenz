@@ -21,10 +21,19 @@ const app = new Hono<{ Bindings: Env }>().basePath('/api');
 
 app.use('*', cors());
 app.use('*', async (c, next) => {
-  if (c.env?.DB) {
-    await ensureD1Schema(c.env.DB);
+  if (!c.env?.DB) {
+    return c.json({
+      error: 'Cloudflare D1 database binding (DB) is not configured.',
+      message: 'Please bind a D1 database named "lenz-db" in your Cloudflare dashboard (Workers & Pages > lenz > Settings > Bindings).'
+    }, 503);
   }
+  await ensureD1Schema(c.env.DB);
   await next();
+});
+
+app.onError((err, c) => {
+  console.error('[API Error]:', err);
+  return c.json({ error: err.message || 'Internal Server Error' }, 500);
 });
 
 // ==================== FOLDERS ====================
@@ -386,7 +395,7 @@ app.get('/taste-profile', async (c) => {
 // ==================== DIRECTORY ====================
 app.get('/directory', async (c) => {
   const feedsRes = await c.env.DB.prepare('SELECT url FROM feeds').all<{ url: string }>();
-  const subscribedUrls = new Set((feedsRes.results || []).map(f => f.url));
+  const subscribedUrls = new Set((feedsRes.results || []).map((f: any) => f.url));
 
   const directoryWithStatus = CURATED_DIRECTORY.map(f => ({
     ...f,
