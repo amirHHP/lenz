@@ -24,7 +24,7 @@ app.use('*', async (c, next) => {
   if (!c.env?.DB) {
     return c.json({
       error: 'Cloudflare D1 database binding (DB) is not configured.',
-      message: 'Please bind a D1 database named "lenz-db" in your Cloudflare dashboard (Workers & Pages > lenz > Settings > Bindings).'
+      message: 'Please bind a D1 database named "lenzz-dbs" in your Cloudflare dashboard (Workers & Pages > lenz > Settings > Bindings).'
     }, 503);
   }
   await ensureD1Schema(c.env.DB);
