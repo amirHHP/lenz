@@ -87,6 +87,25 @@ export function initDatabase() {
       content_json TEXT NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS telegram_subscriptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_id TEXT NOT NULL UNIQUE,
+      username TEXT,
+      first_name TEXT,
+      bot_token TEXT,
+      schedule_times TEXT NOT NULL DEFAULT '["09:00","21:00"]',
+      timezone TEXT DEFAULT 'Asia/Tehran',
+      folder_ids TEXT DEFAULT 'all',
+      is_active INTEGER DEFAULT 1,
+      last_sent_at DATETIME,
+      last_sent_slot TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_telegram_active ON telegram_subscriptions(is_active);
+    CREATE INDEX IF NOT EXISTS idx_telegram_chat_id ON telegram_subscriptions(chat_id);
   `);
 
   // Migration: ensure is_full_extracted column exists on existing articles table
@@ -96,15 +115,30 @@ export function initDatabase() {
     // Column already exists
   }
 
-  // Seed default folders if empty
-  const folderCount = db.prepare('SELECT COUNT(*) as count FROM folders').get() as { count: number };
-  if (folderCount.count === 0) {
-    const insertFolder = db.prepare('INSERT INTO folders (name, icon, order_index) VALUES (?, ?, ?)');
-    insertFolder.run('فناوری و استارتاپ', 'cpu', 0);
-    insertFolder.run('هوش مصنوعی و داده', 'sparkles', 1);
-    insertFolder.run('سیاست و اخبار عمومی', 'globe', 2);
-    insertFolder.run('دانش و پژوهش', 'book-open', 3);
-    insertFolder.run('طراحی و تجربه کاربری', 'palette', 4);
+  // Migration: ensure last_sent_slot column exists on telegram_subscriptions
+  try {
+    db.exec('ALTER TABLE telegram_subscriptions ADD COLUMN last_sent_slot TEXT');
+  } catch {
+    // Column already exists
+  }
+
+  // Seed or ensure default folders exist for all curated categories
+  const defaultFolders = [
+    { name: 'فناوری و استارتاپ', icon: 'cpu', order: 0 },
+    { name: 'هوش مصنوعی و داده', icon: 'sparkles', order: 1 },
+    { name: 'برنامه‌نویسی و مهندسی نرم‌افزار', icon: 'code', order: 2 },
+    { name: 'سیاست و اخبار عمومی', icon: 'globe', order: 3 },
+    { name: 'اقتصاد و بازارهای مالی', icon: 'trending-up', order: 4 },
+    { name: 'دانش و پژوهش', icon: 'book-open', order: 5 },
+    { name: 'طراحی و تجربه کاربری', icon: 'palette', order: 6 },
+    { name: 'امنیت سایبری و شبکه', icon: 'shield', order: 7 },
+    { name: 'بازی و سرگرمی دیجیتال', icon: 'gamepad-2', order: 8 },
+    { name: 'سبک زندگی، فرهنگ و یادگیری', icon: 'sun', order: 9 }
+  ];
+
+  const insertFolder = db.prepare('INSERT OR IGNORE INTO folders (name, icon, order_index) VALUES (?, ?, ?)');
+  for (const f of defaultFolders) {
+    insertFolder.run(f.name, f.icon, f.order);
   }
 
   // Initialize taste profile if empty

@@ -1,6 +1,8 @@
 export interface Env {
   DB: D1Database;
   GEMINI_API_KEY?: string;
+  TELEGRAM_BOT_TOKEN?: string;
+  TELEGRAM_API_ROOT?: string;
 }
 
 export interface FolderRow {

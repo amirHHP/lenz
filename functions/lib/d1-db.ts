@@ -1,7 +1,54 @@
 export async function ensureD1Schema(db: D1Database): Promise<void> {
   // Check if tables already initialized
   const check = await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='folders'").first();
-  if (check) return;
+  if (check) {
+    // Migration: ensure telegram_subscriptions exists on existing databases
+    const checkTg = await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='telegram_subscriptions'").first();
+    if (!checkTg) {
+      await db.batch([
+        db.prepare(`
+          CREATE TABLE IF NOT EXISTS telegram_subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id TEXT NOT NULL UNIQUE,
+            username TEXT,
+            first_name TEXT,
+            bot_token TEXT,
+            schedule_times TEXT NOT NULL DEFAULT '["09:00","21:00"]',
+            timezone TEXT DEFAULT 'Asia/Tehran',
+            folder_ids TEXT DEFAULT 'all',
+            is_active INTEGER DEFAULT 1,
+            last_sent_at DATETIME,
+            last_sent_slot TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          )
+        `),
+        db.prepare(`CREATE INDEX IF NOT EXISTS idx_telegram_active ON telegram_subscriptions(is_active)`),
+        db.prepare(`CREATE INDEX IF NOT EXISTS idx_telegram_chat_id ON telegram_subscriptions(chat_id)`)
+      ]);
+    } else {
+      try {
+        await db.prepare('ALTER TABLE telegram_subscriptions ADD COLUMN last_sent_slot TEXT').run();
+      } catch {
+        // Column already exists
+      }
+    }
+    // Ensure all 10 default folders exist
+    await db.prepare(`
+      INSERT OR IGNORE INTO folders (name, icon, order_index) VALUES 
+        ('فناوری و استارتاپ', 'cpu', 0),
+        ('هوش مصنوعی و داده', 'sparkles', 1),
+        ('برنامه‌نویسی و مهندسی نرم‌افزار', 'code', 2),
+        ('سیاست و اخبار عمومی', 'globe', 3),
+        ('اقتصاد و بازارهای مالی', 'trending-up', 4),
+        ('دانش و پژوهش', 'book-open', 5),
+        ('طراحی و تجربه کاربری', 'palette', 6),
+        ('امنیت سایبری و شبکه', 'shield', 7),
+        ('بازی و سرگرمی دیجیتال', 'gamepad-2', 8),
+        ('سبک زندگی، فرهنگ و یادگیری', 'sun', 9)
+    `).run();
+    return;
+  }
 
   // Execute initialization statements in batch
   await db.batch([
@@ -82,12 +129,36 @@ export async function ensureD1Schema(db: D1Database): Promise<void> {
       )
     `),
     db.prepare(`
+      CREATE TABLE IF NOT EXISTS telegram_subscriptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id TEXT NOT NULL UNIQUE,
+        username TEXT,
+        first_name TEXT,
+        bot_token TEXT,
+        schedule_times TEXT NOT NULL DEFAULT '["09:00","21:00"]',
+        timezone TEXT DEFAULT 'Asia/Tehran',
+        folder_ids TEXT DEFAULT 'all',
+        is_active INTEGER DEFAULT 1,
+        last_sent_at DATETIME,
+        last_sent_slot TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_telegram_active ON telegram_subscriptions(is_active)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_telegram_chat_id ON telegram_subscriptions(chat_id)`),
+    db.prepare(`
       INSERT OR IGNORE INTO folders (name, icon, order_index) VALUES 
         ('فناوری و استارتاپ', 'cpu', 0),
         ('هوش مصنوعی و داده', 'sparkles', 1),
-        ('سیاست و اخبار عمومی', 'globe', 2),
-        ('دانش و پژوهش', 'book-open', 3),
-        ('طراحی و تجربه کاربری', 'palette', 4)
+        ('برنامه‌نویسی و مهندسی نرم‌افزار', 'code', 2),
+        ('سیاست و اخبار عمومی', 'globe', 3),
+        ('اقتصاد و بازارهای مالی', 'trending-up', 4),
+        ('دانش و پژوهش', 'book-open', 5),
+        ('طراحی و تجربه کاربری', 'palette', 6),
+        ('امنیت سایبری و شبکه', 'shield', 7),
+        ('بازی و سرگرمی دیجیتال', 'gamepad-2', 8),
+        ('سبک زندگی، فرهنگ و یادگیری', 'sun', 9)
     `),
     db.prepare(`
       INSERT OR IGNORE INTO user_profile (key, value) VALUES (

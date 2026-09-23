@@ -10,6 +10,7 @@ import { FolderModal } from './components/FolderModal';
 import { TasteProfileModal } from './components/TasteProfileModal';
 import { ShortcutsModal } from './components/ShortcutsModal';
 import { SettingsModal } from './components/SettingsModal';
+import { TelegramModal } from './components/TelegramModal';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { Article, Feed, Folder, ActiveView } from './types';
 
@@ -49,6 +50,7 @@ export const App: React.FC = () => {
   const [isTasteProfileOpen, setIsTasteProfileOpen] = useState(false);
   const [isShortcutsOpen, setIsShortcutsOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isTelegramOpen, setIsTelegramOpen] = useState(false);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -362,6 +364,7 @@ export const App: React.FC = () => {
           onOpenTasteProfile={() => setIsTasteProfileOpen(true)}
           onOpenShortcuts={() => setIsShortcutsOpen(true)}
           onOpenSettings={() => setIsSettingsOpen(true)}
+          onOpenTelegram={() => setIsTelegramOpen(true)}
           onDeleteFeed={handleDeleteFeed}
           onUpdateFeed={handleUpdateFeed}
           onDeleteFolder={handleDeleteFolder}
@@ -419,6 +422,11 @@ export const App: React.FC = () => {
         onClose={() => setIsSettingsOpen(false)}
         isDark={isDark}
         onToggleTheme={() => setIsDark(prev => !prev)}
+        onOpenTelegram={() => setIsTelegramOpen(true)}
+      />
+      <TelegramModal
+        isOpen={isTelegramOpen}
+        onClose={() => setIsTelegramOpen(false)}
       />
       <DirectoryModal
         isOpen={isDirectoryOpen}

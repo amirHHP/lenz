@@ -15,7 +15,8 @@ import {
   ChevronLeft, 
   Brain,
   Plus,
-  Trash2
+  Trash2,
+  Send
 } from 'lucide-react';
 import { Folder, Feed, ActiveView } from '../types';
 
@@ -35,6 +36,7 @@ interface Props {
   onOpenTasteProfile: () => void;
   onOpenShortcuts: () => void;
   onOpenSettings: () => void;
+  onOpenTelegram?: () => void;
   onDeleteFeed: (feedId: number) => void;
   onUpdateFeed?: (feedId: number, folderId: number | null, title?: string) => void;
   onDeleteFolder?: (folderId: number) => void;
@@ -65,6 +67,7 @@ export const Sidebar: React.FC<Props> = ({
   onOpenTasteProfile,
   onOpenShortcuts,
   onOpenSettings,
+  onOpenTelegram,
   onDeleteFeed,
   onUpdateFeed,
   onDeleteFolder
@@ -406,6 +409,17 @@ export const Sidebar: React.FC<Props> = ({
           <Brain className="w-3.5 h-3.5 text-indigo-500" />
           <span>سلایق یادگرفته‌شده (AI)</span>
         </button>
+
+        {/* Telegram Digest Integration */}
+        {onOpenTelegram && (
+          <button
+            onClick={onOpenTelegram}
+            className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs text-sky-600 dark:text-sky-400 font-semibold hover:bg-sky-50 dark:hover:bg-sky-950/40 rounded-lg transition-colors"
+          >
+            <Send className="w-3.5 h-3.5" />
+            <span>اتصال به تلگرام و خلاصه</span>
+          </button>
+        )}
 
         <div className="flex items-center justify-between pt-1 text-zinc-400">
           <button

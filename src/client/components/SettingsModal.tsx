@@ -1,14 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { X, Settings, Sparkles, Key, Check, Moon, Sun } from 'lucide-react';
+import { X, Settings, Sparkles, Key, Check, Moon, Sun, Send } from 'lucide-react';
 
 interface Props {
   isOpen: boolean;
   onClose: () => void;
   isDark: boolean;
   onToggleTheme: () => void;
+  onOpenTelegram?: () => void;
 }
 
-export const SettingsModal: React.FC<Props> = ({ isOpen, onClose, isDark, onToggleTheme }) => {
+export const SettingsModal: React.FC<Props> = ({ isOpen, onClose, isDark, onToggleTheme, onOpenTelegram }) => {
   const [apiKey, setApiKey] = useState('');
   const [hasKey, setHasKey] = useState(false);
   const [maskedKey, setMaskedKey] = useState<string | null>(null);
@@ -116,6 +117,31 @@ export const SettingsModal: React.FC<Props> = ({ isOpen, onClose, isDark, onTogg
                 </button>
               </div>
             </form>
+          </div>
+
+          {/* Telegram Settings Entry */}
+          <div className="flex items-center justify-between p-4 bg-zinc-50 dark:bg-zinc-800/60 rounded-xl border border-zinc-200/60 dark:border-zinc-700/60">
+            <div>
+              <div className="flex items-center gap-2 text-sky-600 dark:text-sky-400 font-semibold text-sm">
+                <Send className="w-4 h-4" />
+                <p className="text-zinc-800 dark:text-zinc-200">اتصال به تلگرام و زمان‌بندی خلاصه اخبار</p>
+              </div>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+                دریافت منظم چکیده اخبار گروه‌های منتخب طبق ساعات دلخواه در تلگرام
+              </p>
+            </div>
+            {onOpenTelegram && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onOpenTelegram();
+                }}
+                className="px-3.5 py-1.5 text-xs font-semibold bg-sky-600 hover:bg-sky-700 text-white rounded-lg transition-colors shrink-0"
+              >
+                تنظیمات تلگرام
+              </button>
+            )}
           </div>
         </div>
       </div>

@@ -16,6 +16,13 @@ import {
 } from '../lib/edge-ranking.js';
 import { generateTodayBriefingInD1, getGeminiApiKey } from '../lib/edge-ai.js';
 import { ensureD1Schema } from '../lib/d1-db.js';
+import { 
+  getTelegramBotToken, 
+  sendTelegramMessage, 
+  generateGroupNewsDigestInD1,
+  detectLatestTelegramChatInD1,
+  handleTelegramWebhookUpdateInD1
+} from '../lib/edge-telegram.js';
 
 const app = new Hono<{ Bindings: Env }>().basePath('/api');
 
@@ -395,14 +402,90 @@ app.get('/taste-profile', async (c) => {
 // ==================== DIRECTORY ====================
 app.get('/directory', async (c) => {
   const feedsRes = await c.env.DB.prepare('SELECT url FROM feeds').all<{ url: string }>();
-  const subscribedUrls = new Set((feedsRes.results || []).map((f: any) => f.url));
+  const subscribedUrls = new Set<string>();
+  for (const f of (feedsRes.results || [])) {
+    if (f && f.url) {
+      const u = f.url.trim();
+      subscribedUrls.add(u);
+      subscribedUrls.add(u.endsWith('/') ? u.slice(0, -1) : u + '/');
+    }
+  }
 
   const directoryWithStatus = CURATED_DIRECTORY.map(f => ({
     ...f,
-    isSubscribed: subscribedUrls.has(f.url)
+    isSubscribed: subscribedUrls.has(f.url.trim())
   }));
 
   return c.json({ directory: directoryWithStatus });
+});
+
+app.post('/directory/subscribe', async (c) => {
+  try {
+    const { directoryId, folderId } = await c.req.json();
+    const item = CURATED_DIRECTORY.find(d => d.id === directoryId);
+    if (!item) {
+      return c.json({ error: 'منبع در دایرکتوری یافت نشد' }, 404);
+    }
+
+    const targetUrl = item.url.trim();
+    const altUrl = targetUrl.endsWith('/') ? targetUrl.slice(0, -1) : targetUrl + '/';
+    const existing = await c.env.DB.prepare('SELECT id FROM feeds WHERE url = ? OR url = ?').bind(targetUrl, altUrl).first<any>();
+    if (existing) {
+      return c.json({ id: existing.id, message: 'قبلاً سابسکرایب شده است', alreadySubscribed: true });
+    }
+
+    // Determine target folder: use provided folderId, find by category name, or auto-create category folder
+    let targetFolderId = folderId ? Number(folderId) : null;
+    if (!targetFolderId && item.category) {
+      const folder = await c.env.DB.prepare('SELECT id FROM folders WHERE name = ?').bind(item.category).first<any>();
+      if (folder) {
+        targetFolderId = folder.id;
+      } else {
+        const maxOrderRes = await c.env.DB.prepare('SELECT MAX(order_index) as m FROM folders').first<any>();
+        const nextOrder = (maxOrderRes?.m ?? 0) + 1;
+        await c.env.DB.prepare('INSERT INTO folders (name, icon, order_index) VALUES (?, ?, ?)')
+          .bind(item.category, item.icon || 'folder', nextOrder)
+          .run();
+        const newFolder = await c.env.DB.prepare('SELECT id FROM folders WHERE name = ?').bind(item.category).first<any>();
+        if (newFolder) targetFolderId = newFolder.id;
+      }
+    }
+
+    let domain = '';
+    try {
+      domain = new URL(item.siteUrl).hostname;
+    } catch {}
+    const iconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=64` : '';
+
+    await c.env.DB.prepare(`
+      INSERT INTO feeds (folder_id, title, url, site_url, description, icon_url)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(
+      targetFolderId || null,
+      item.title,
+      targetUrl,
+      item.siteUrl,
+      item.description,
+      iconUrl
+    ).run();
+
+    const createdFeed = await c.env.DB.prepare('SELECT * FROM feeds WHERE url = ? OR url = ?').bind(targetUrl, altUrl).first<any>();
+
+    if (createdFeed && process.env.NODE_ENV !== 'test') {
+      try {
+        await Promise.race([
+          syncFeedInD1(c.env.DB, createdFeed.id),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000))
+        ]);
+      } catch (e) {
+        console.warn('Initial sync notice for directory feed:', e);
+      }
+    }
+
+    return c.json({ id: createdFeed?.id, success: true });
+  } catch (error: any) {
+    return c.json({ error: error.message || 'خطا در سابسکرایب' }, 500);
+  }
 });
 
 // ==================== SETTINGS ====================
@@ -419,6 +502,184 @@ app.post('/settings', async (c) => {
       .run();
   }
   return c.json({ success: true });
+});
+
+// ==================== TELEGRAM ====================
+app.get('/telegram/status', async (c) => {
+  const botToken = await getTelegramBotToken(c.env.DB, c.env);
+  const subsRes = await c.env.DB.prepare('SELECT * FROM telegram_subscriptions ORDER BY id DESC').all<any>();
+  const foldersRes = await c.env.DB.prepare('SELECT * FROM folders ORDER BY order_index ASC').all<any>();
+
+  return c.json({
+    botTokenConfigured: Boolean(botToken),
+    maskedBotToken: botToken ? `${botToken.slice(0, 6)}...${botToken.slice(-4)}` : null,
+    subscriptions: (subsRes.results || []).map((s: any) => ({
+      ...s,
+      schedule_times: typeof s.schedule_times === 'string' ? JSON.parse(s.schedule_times) : s.schedule_times,
+      folder_ids: s.folder_ids !== 'all' ? JSON.parse(s.folder_ids) : 'all'
+    })),
+    folders: foldersRes.results || []
+  });
+});
+
+app.post('/telegram/bot-token', async (c) => {
+  const { botToken } = await c.req.json();
+  if (botToken) {
+    await c.env.DB.prepare("INSERT INTO user_profile (key, value) VALUES ('telegram_bot_token', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .bind(botToken.trim())
+      .run();
+  } else {
+    await c.env.DB.prepare("DELETE FROM user_profile WHERE key = 'telegram_bot_token'").run();
+  }
+  return c.json({ success: true });
+});
+
+app.post('/telegram/subscriptions', async (c) => {
+  const { chatId, username, firstName, botToken, scheduleTimes, timezone, folderIds, isActive } = await c.req.json();
+  if (!chatId?.trim()) {
+    return c.json({ error: 'شناسه چت الزامی است.' }, 400);
+  }
+  const scheduleJson = JSON.stringify(Array.isArray(scheduleTimes) && scheduleTimes.length > 0 ? scheduleTimes : ['09:00', '21:00']);
+  const foldersJson = folderIds === 'all' || !folderIds ? 'all' : JSON.stringify(folderIds);
+  const tz = timezone || 'Asia/Tehran';
+  const active = isActive === false ? 0 : 1;
+
+  await c.env.DB.prepare(`
+    INSERT INTO telegram_subscriptions (chat_id, username, first_name, bot_token, schedule_times, timezone, folder_ids, is_active)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(chat_id) DO UPDATE SET
+      username = excluded.username,
+      first_name = excluded.first_name,
+      bot_token = excluded.bot_token,
+      schedule_times = excluded.schedule_times,
+      timezone = excluded.timezone,
+      folder_ids = excluded.folder_ids,
+      is_active = excluded.is_active,
+      updated_at = CURRENT_TIMESTAMP
+  `).bind(chatId.trim(), username || null, firstName || null, botToken?.trim() || null, scheduleJson, tz, foldersJson, active).run();
+
+  const sub = await c.env.DB.prepare('SELECT * FROM telegram_subscriptions WHERE chat_id = ?').bind(chatId.trim()).first<any>();
+  return c.json({
+    success: true,
+    subscription: {
+      ...sub,
+      schedule_times: JSON.parse(sub.schedule_times),
+      folder_ids: sub.folder_ids !== 'all' ? JSON.parse(sub.folder_ids) : 'all'
+    }
+  });
+});
+
+app.put('/telegram/subscriptions/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  const { chatId, username, firstName, scheduleTimes, timezone, folderIds, isActive } = await c.req.json();
+  const existing = await c.env.DB.prepare('SELECT * FROM telegram_subscriptions WHERE id = ?').bind(id).first<any>();
+  if (!existing) {
+    return c.json({ error: 'اشتراک تلگرام یافت نشد.' }, 404);
+  }
+
+  const targetChatId = chatId && String(chatId).trim() ? String(chatId).trim() : existing.chat_id;
+  const targetUsername = username !== undefined ? (username || null) : existing.username;
+  const targetFirstName = firstName !== undefined ? (firstName || null) : existing.first_name;
+  const scheduleJson = scheduleTimes ? JSON.stringify(scheduleTimes) : existing.schedule_times;
+  const foldersJson = folderIds !== undefined ? (folderIds === 'all' ? 'all' : JSON.stringify(folderIds)) : existing.folder_ids;
+  const tz = timezone !== undefined ? timezone : existing.timezone;
+  const active = isActive !== undefined ? (isActive ? 1 : 0) : existing.is_active;
+
+  await c.env.DB.prepare(`
+    UPDATE telegram_subscriptions
+    SET chat_id = ?, username = ?, first_name = ?, schedule_times = ?, timezone = ?, folder_ids = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(targetChatId, targetUsername, targetFirstName, scheduleJson, tz, foldersJson, active, id).run();
+
+  const updated = await c.env.DB.prepare('SELECT * FROM telegram_subscriptions WHERE id = ?').bind(id).first<any>();
+  return c.json({
+    success: true,
+    subscription: {
+      ...updated,
+      schedule_times: JSON.parse(updated.schedule_times),
+      folder_ids: updated.folder_ids !== 'all' ? JSON.parse(updated.folder_ids) : 'all'
+    }
+  });
+});
+
+app.delete('/telegram/subscriptions/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  await c.env.DB.prepare('DELETE FROM telegram_subscriptions WHERE id = ?').bind(id).run();
+  return c.json({ success: true });
+});
+
+app.all('/telegram/detect-chat', async (c) => {
+  const body = c.req.method === 'POST' ? await c.req.json().catch(() => ({})) : {};
+  const query = c.req.query();
+  const botToken = (body.botToken || query.botToken) as string | undefined;
+  const token = botToken || await getTelegramBotToken(c.env.DB, c.env);
+  if (!token) return c.json({ ok: false, error: 'توکن ربات تلگرام تنظیم نشده است.' }, 400);
+
+  const res = await detectLatestTelegramChatInD1(token, c.env);
+  if (!res.ok) {
+    return c.json(res, 400);
+  }
+  return c.json(res);
+});
+
+app.post('/telegram/webhook', async (c) => {
+  const update = await c.req.json().catch(() => ({}));
+  const res = await handleTelegramWebhookUpdateInD1(c.env.DB, c.env, update);
+  return c.json(res);
+});
+
+app.post('/telegram/test', async (c) => {
+  const { chatId, botToken } = await c.req.json();
+  if (!chatId || !String(chatId).trim()) {
+    return c.json({ error: 'شناسه چت الزامی است' }, 400);
+  }
+  const token = botToken || await getTelegramBotToken(c.env.DB, c.env);
+  if (!token) return c.json({ error: 'توکن ربات تنظیم نشده است' }, 400);
+  const testMsg = `🔔 <b>پیام تست اتصال لنز (Lenz) به تلگرام</b>\n\nحساب شما با موفقیت متصل شد. ✨`;
+  const res = await sendTelegramMessage(token, String(chatId).trim(), testMsg, c.env);
+  if (!res.ok) {
+    return c.json({ success: false, error: res.error || 'ارسال پیام تست با خطا مواجه شد' }, 400);
+  }
+  return c.json({ success: true, messageId: res.messageId });
+});
+
+app.post('/telegram/digest/send', async (c) => {
+  const { chatId, subscriptionId, folderIds, botToken } = await c.req.json();
+  const token = botToken || await getTelegramBotToken(c.env.DB, c.env);
+  if (!token) return c.json({ error: 'توکن ربات تنظیم نشده است' }, 400);
+
+  let targetChat = chatId;
+  let targetFolderIds = folderIds || 'all';
+
+  if (subscriptionId) {
+    const sub = await c.env.DB.prepare('SELECT * FROM telegram_subscriptions WHERE id = ?').bind(Number(subscriptionId)).first<any>();
+    if (sub) {
+      targetChat = sub.chat_id;
+      if (sub.folder_ids && sub.folder_ids !== 'all') {
+        try { targetFolderIds = JSON.parse(sub.folder_ids); } catch { targetFolderIds = 'all'; }
+      }
+    }
+  }
+
+  if (!targetChat) {
+    const firstActive = await c.env.DB.prepare('SELECT chat_id FROM telegram_subscriptions WHERE is_active = 1 LIMIT 1').first<any>();
+    if (firstActive) targetChat = firstActive.chat_id;
+  }
+  if (!targetChat) return c.json({ error: 'شناسه چت یافت نشد' }, 400);
+
+  const digest = await generateGroupNewsDigestInD1(c.env.DB, targetFolderIds);
+  for (const chunk of digest.textChunks) {
+    const sendRes = await sendTelegramMessage(token, targetChat, chunk, c.env);
+    if (!sendRes.ok) {
+      return c.json({ success: false, error: sendRes.error }, 400);
+    }
+  }
+  return c.json({
+    success: true,
+    messageCount: digest.textChunks.length,
+    groupCount: digest.groupCount,
+    articleCount: digest.articleCount
+  });
 });
 
 export { app };

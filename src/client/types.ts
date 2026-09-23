@@ -103,3 +103,41 @@ export type ActiveView =
   | { type: 'highlights' }
   | { type: 'folder'; folderId: number; folderName: string }
   | { type: 'feed'; feedId: number; feedTitle: string };
+
+export interface TelegramSubscription {
+  id: number;
+  chat_id: string;
+  username: string | null;
+  first_name: string | null;
+  bot_token: string | null;
+  schedule_times: string[];
+  timezone: string;
+  folder_ids: number[] | 'all';
+  is_active: number;
+  last_sent_at: string | null;
+  last_sent_slot?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TelegramFolderSummary {
+  id: number;
+  name: string;
+  icon: string;
+  feed_count: number;
+  article_count: number;
+  unread_count: number;
+}
+
+export interface TelegramStatusResponse {
+  botTokenConfigured: boolean;
+  maskedBotToken: string | null;
+  botInfo?: {
+    ok: boolean;
+    username?: string;
+    firstName?: string;
+    error?: string;
+  } | null;
+  subscriptions: TelegramSubscription[];
+  folders: TelegramFolderSummary[];
+}

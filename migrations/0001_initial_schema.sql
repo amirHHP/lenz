@@ -76,9 +76,14 @@ CREATE TABLE IF NOT EXISTS briefings (
 INSERT OR IGNORE INTO folders (name, icon, order_index) VALUES 
   ('فناوری و استارتاپ', 'cpu', 0),
   ('هوش مصنوعی و داده', 'sparkles', 1),
-  ('سیاست و اخبار عمومی', 'globe', 2),
-  ('دانش و پژوهش', 'book-open', 3),
-  ('طراحی و تجربه کاربری', 'palette', 4);
+  ('برنامه‌نویسی و مهندسی نرم‌افزار', 'code', 2),
+  ('سیاست و اخبار عمومی', 'globe', 3),
+  ('اقتصاد و بازارهای مالی', 'trending-up', 4),
+  ('دانش و پژوهش', 'book-open', 5),
+  ('طراحی و تجربه کاربری', 'palette', 6),
+  ('امنیت سایبری و شبکه', 'shield', 7),
+  ('بازی و سرگرمی دیجیتال', 'gamepad-2', 8),
+  ('سبک زندگی، فرهنگ و یادگیری', 'sun', 9);
 
 -- Seed initial taste profile
 INSERT OR IGNORE INTO user_profile (key, value) VALUES (

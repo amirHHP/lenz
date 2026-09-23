@@ -18,6 +18,19 @@ import {
   recalculateUnreadScores 
 } from './ranking.js';
 import { generateTodayBriefing, generateArticleSummary, getGeminiApiKey } from './ai.js';
+import { 
+  getTelegramBotToken, 
+  setTelegramBotToken, 
+  getTelegramBotInfo, 
+  sendTelegramMessage, 
+  generateGroupNewsDigest, 
+  sendDigestToSubscription, 
+  checkAndRunScheduledDigests, 
+  handleTelegramWebhookUpdate,
+  detectLatestTelegramChat,
+  pollTelegramUpdates,
+  setTelegramWebhook
+} from './telegram.js';
 
 dotenv.config();
 
@@ -34,10 +47,18 @@ app.use(express.json({ limit: '10mb' }));
 // Directory Routes
 // ----------------------------------------------------
 app.get('/api/directory', (req: Request, res: Response) => {
-  const subscribedUrls = (db.prepare('SELECT url FROM feeds').all() as { url: string }[]).map(f => f.url);
+  const subscribedList = (db.prepare('SELECT url FROM feeds').all() as { url: string }[]);
+  const subscribedSet = new Set<string>();
+  for (const f of subscribedList) {
+    if (f && f.url) {
+      const u = f.url.trim();
+      subscribedSet.add(u);
+      subscribedSet.add(u.endsWith('/') ? u.slice(0, -1) : u + '/');
+    }
+  }
   const directoryWithSubStatus = CURATED_DIRECTORY.map(item => ({
     ...item,
-    isSubscribed: subscribedUrls.includes(item.url)
+    isSubscribed: subscribedSet.has(item.url.trim())
   }));
   res.json({ directory: directoryWithSubStatus });
 });
@@ -50,16 +71,26 @@ app.post('/api/directory/subscribe', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'منبع در دایرکتوری یافت نشد' });
     }
 
-    const existing = db.prepare('SELECT id FROM feeds WHERE url = ?').get(item.url) as any;
+    const targetUrl = item.url.trim();
+    const altUrl = targetUrl.endsWith('/') ? targetUrl.slice(0, -1) : targetUrl + '/';
+    const existing = db.prepare('SELECT id FROM feeds WHERE url = ? OR url = ?').get(targetUrl, altUrl) as any;
     if (existing) {
-      return res.json({ id: existing.id, message: 'قبلاً سابسکرایب شده است' });
+      return res.json({ id: existing.id, message: 'قبلاً سابسکرایب شده است', alreadySubscribed: true });
     }
 
-    // Determine target folder
-    let targetFolderId = folderId;
-    if (!targetFolderId) {
+    // Determine target folder: use provided folderId, find by category name, or auto-create category folder
+    let targetFolderId = folderId ? Number(folderId) : null;
+    if (!targetFolderId && item.category) {
       const folder = db.prepare('SELECT id FROM folders WHERE name = ?').get(item.category) as any;
-      if (folder) targetFolderId = folder.id;
+      if (folder) {
+        targetFolderId = folder.id;
+      } else {
+        const maxOrder = db.prepare('SELECT MAX(order_index) as m FROM folders').get() as any;
+        const nextOrder = (maxOrder?.m ?? 0) + 1;
+        const insertFolder = db.prepare('INSERT INTO folders (name, icon, order_index) VALUES (?, ?, ?)');
+        const fInfo = insertFolder.run(item.category, item.icon || 'folder', nextOrder);
+        targetFolderId = Number(fInfo.lastInsertRowid);
+      }
     }
 
     const insert = db.prepare(`
@@ -69,21 +100,29 @@ app.post('/api/directory/subscribe', async (req: Request, res: Response) => {
     const info = insert.run(
       targetFolderId || null,
       item.title,
-      item.url,
+      targetUrl,
       item.siteUrl,
       item.description,
       getFaviconUrl(item.siteUrl)
     );
 
     const feedId = Number(info.lastInsertRowid);
-    // Background sync (skip in test mode to avoid unmocked external network calls)
+
+    // Initial sync so articles are immediately available in the UI (skip in test mode to avoid unmocked external network calls)
     if (process.env.NODE_ENV !== 'test') {
-      syncFeed(feedId).catch(err => console.error('Initial sync error:', err));
+      try {
+        await Promise.race([
+          syncFeed(feedId),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000))
+        ]);
+      } catch (err) {
+        console.warn('Initial sync notice for directory feed:', err);
+      }
     }
 
     res.json({ id: feedId, success: true });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: error.message || 'خطا در سابسکرایب' });
   }
 });
 
@@ -575,6 +614,255 @@ app.post('/api/settings', (req: Request, res: Response) => {
   }
 });
 
+// ----------------------------------------------------
+// Telegram Integration & Scheduled Group News Digest
+// ----------------------------------------------------
+app.get('/api/telegram/status', async (req: Request, res: Response) => {
+  try {
+    const botToken = getTelegramBotToken();
+    let botInfo = null;
+    if (botToken) {
+      botInfo = await getTelegramBotInfo(botToken);
+    }
+    const subscriptions = db.prepare('SELECT * FROM telegram_subscriptions ORDER BY id DESC').all() as any[];
+    const folders = db.prepare(`
+      SELECT f.id, f.name, f.icon, 
+        (SELECT COUNT(*) FROM feeds WHERE folder_id = f.id) as feed_count,
+        (SELECT COUNT(*) FROM articles a JOIN feeds fd ON a.feed_id = fd.id WHERE fd.folder_id = f.id) as article_count,
+        (SELECT COUNT(*) FROM articles a JOIN feeds fd ON a.feed_id = fd.id WHERE fd.folder_id = f.id AND a.is_read = 0) as unread_count
+      FROM folders f
+      ORDER BY f.order_index ASC, f.id ASC
+    `).all();
+
+    res.json({
+      botTokenConfigured: Boolean(botToken),
+      maskedBotToken: botToken ? `${botToken.slice(0, 6)}...${botToken.slice(-4)}` : null,
+      botInfo,
+      subscriptions: subscriptions.map(s => {
+        let scheduleTimes: string[] = ['09:00', '21:00'];
+        try {
+          scheduleTimes = typeof s.schedule_times === 'string' ? JSON.parse(s.schedule_times) : s.schedule_times;
+        } catch {
+          scheduleTimes = [s.schedule_times];
+        }
+        let folderIds: number[] | 'all' = 'all';
+        try {
+          folderIds = s.folder_ids !== 'all' ? JSON.parse(s.folder_ids) : 'all';
+        } catch {
+          folderIds = 'all';
+        }
+        return {
+          ...s,
+          schedule_times: scheduleTimes,
+          folder_ids: folderIds
+        };
+      }),
+      folders
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/telegram/bot-token', async (req: Request, res: Response) => {
+  try {
+    const { botToken } = req.body;
+    setTelegramBotToken(botToken || null);
+    const info = botToken ? await getTelegramBotInfo(botToken.trim()) : null;
+    res.json({ success: true, botInfo: info });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/telegram/subscriptions', (req: Request, res: Response) => {
+  try {
+    const { chatId, username, firstName, botToken, scheduleTimes, timezone, folderIds, isActive } = req.body;
+    if (!chatId || !String(chatId).trim()) {
+      return res.status(400).json({ error: 'شناسه چت (Chat ID) الزامی است.' });
+    }
+    const cleanChatId = String(chatId).trim();
+    const scheduleJson = JSON.stringify(Array.isArray(scheduleTimes) && scheduleTimes.length > 0 ? scheduleTimes : ['09:00', '21:00']);
+    const foldersJson = folderIds === 'all' || !folderIds ? 'all' : JSON.stringify(folderIds);
+    const tz = timezone || 'Asia/Tehran';
+    const active = isActive === false || isActive === 0 ? 0 : 1;
+
+    db.prepare(`
+      INSERT INTO telegram_subscriptions (chat_id, username, first_name, bot_token, schedule_times, timezone, folder_ids, is_active)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(chat_id) DO UPDATE SET
+        username = excluded.username,
+        first_name = excluded.first_name,
+        bot_token = excluded.bot_token,
+        schedule_times = excluded.schedule_times,
+        timezone = excluded.timezone,
+        folder_ids = excluded.folder_ids,
+        is_active = excluded.is_active,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(cleanChatId, username || null, firstName || null, botToken?.trim() || null, scheduleJson, tz, foldersJson, active);
+
+    const sub = db.prepare('SELECT * FROM telegram_subscriptions WHERE chat_id = ?').get(cleanChatId) as any;
+    res.json({
+      success: true,
+      subscription: {
+        ...sub,
+        schedule_times: JSON.parse(sub.schedule_times),
+        folder_ids: sub.folder_ids !== 'all' ? JSON.parse(sub.folder_ids) : 'all'
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/telegram/subscriptions/:id', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { chatId, username, firstName, scheduleTimes, timezone, folderIds, isActive } = req.body;
+    const existing = db.prepare('SELECT * FROM telegram_subscriptions WHERE id = ?').get(id) as any;
+    if (!existing) {
+      return res.status(404).json({ error: 'اشتراک تلگرام یافت نشد.' });
+    }
+    const targetChatId = chatId && String(chatId).trim() ? String(chatId).trim() : existing.chat_id;
+    const targetUsername = username !== undefined ? (username || null) : existing.username;
+    const targetFirstName = firstName !== undefined ? (firstName || null) : existing.first_name;
+    const scheduleJson = scheduleTimes ? JSON.stringify(scheduleTimes) : existing.schedule_times;
+    const foldersJson = folderIds !== undefined ? (folderIds === 'all' ? 'all' : JSON.stringify(folderIds)) : existing.folder_ids;
+    const tz = timezone !== undefined ? timezone : existing.timezone;
+    const active = isActive !== undefined ? (isActive ? 1 : 0) : existing.is_active;
+
+    db.prepare(`
+      UPDATE telegram_subscriptions
+      SET chat_id = ?, username = ?, first_name = ?, schedule_times = ?, timezone = ?, folder_ids = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(targetChatId, targetUsername, targetFirstName, scheduleJson, tz, foldersJson, active, id);
+
+    const updated = db.prepare('SELECT * FROM telegram_subscriptions WHERE id = ?').get(id) as any;
+    res.json({
+      success: true,
+      subscription: {
+        ...updated,
+        schedule_times: JSON.parse(updated.schedule_times),
+        folder_ids: updated.folder_ids !== 'all' ? JSON.parse(updated.folder_ids) : 'all'
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/telegram/subscriptions/:id', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    db.prepare('DELETE FROM telegram_subscriptions WHERE id = ?').run(id);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/telegram/test', async (req: Request, res: Response) => {
+  try {
+    const { chatId, botToken } = req.body;
+    if (!chatId || !String(chatId).trim()) {
+      return res.status(400).json({ error: 'شناسه چت (Chat ID) الزامی است.' });
+    }
+    const testMsg = `🔔 <b>پیام تست اتصال لنز (Lenz) به تلگرام</b>\n\n` +
+      `✅ تبریک! حساب شما با موفقیت به فیدخوان هوشمند لنز متصل شد.\n` +
+      `خلاصه اخبار گروه‌هایی که عضوش هستید طبق زمان‌بندی انتخابی به همین چت ارسال خواهد شد. ✨`;
+
+    const result = await sendTelegramMessage(String(chatId).trim(), testMsg, botToken?.trim());
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error || 'ارسال پیام تست با خطا مواجه شد.' });
+    }
+    res.json({ success: true, message: 'پیام تست با موفقیت در تلگرام ارسال شد.', messageId: result.messageId });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/telegram/digest/send', async (req: Request, res: Response) => {
+  try {
+    const { subscriptionId, chatId, folderIds, botToken } = req.body;
+    if (subscriptionId) {
+      const resSub = await sendDigestToSubscription(Number(subscriptionId));
+      if (!resSub.success) {
+        return res.status(400).json({ error: resSub.error || 'ارسال خلاصه با خطا مواجه شد.' });
+      }
+      return res.json({ success: true, messageCount: resSub.messageCount });
+    }
+
+    let targetChatId = chatId;
+    if (!targetChatId) {
+      const firstActive = db.prepare('SELECT chat_id FROM telegram_subscriptions WHERE is_active = 1 LIMIT 1').get() as any;
+      if (firstActive) {
+        targetChatId = firstActive.chat_id;
+      }
+    }
+
+    if (!targetChatId) {
+      return res.status(400).json({ error: 'هیچ شناسه چت فعالی یافت نشد. لطفاً ابتدا حساب تلگرام خود را متصل کنید.' });
+    }
+
+    const digest = await generateGroupNewsDigest(folderIds || 'all');
+    const token = botToken || getTelegramBotToken();
+    for (const chunk of digest.textChunks) {
+      const sendRes = await sendTelegramMessage(String(targetChatId).trim(), chunk, token);
+      if (!sendRes.ok) {
+        return res.status(400).json({ error: sendRes.error });
+      }
+    }
+
+    res.json({
+      success: true,
+      messageCount: digest.textChunks.length,
+      groupCount: digest.groupCount,
+      articleCount: digest.articleCount
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
+  try {
+    const update = req.body;
+    const result = await handleTelegramWebhookUpdate(update);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.all('/api/telegram/detect-chat', async (req: Request, res: Response) => {
+  try {
+    const botToken = (req.body?.botToken || req.query?.botToken) as string | undefined;
+    const result = await detectLatestTelegramChat(botToken);
+    if (!result.ok) {
+      return res.status(400).json(result);
+    }
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/telegram/webhook/set', async (req: Request, res: Response) => {
+  try {
+    const { webhookUrl, botToken } = req.body;
+    if (!webhookUrl) {
+      return res.status(400).json({ error: 'آدرس وبهوک الزامی است.' });
+    }
+    const result = await setTelegramWebhook(webhookUrl, botToken);
+    if (!result.ok) {
+      return res.status(400).json(result);
+    }
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Serve frontend in production build if exists
 const distPath = path.join(process.cwd(), 'dist');
 app.use(express.static(distPath));
@@ -590,11 +878,19 @@ app.use((req: Request, res: Response, next) => {
   });
 });
 
-// Background periodic sync every 30 minutes
+// Background periodic sync every 30 minutes, Telegram scheduler every 60s, & Telegram poller every 12s
 if (process.env.NODE_ENV !== 'test') {
   setInterval(() => {
     syncAllFeeds().catch(err => console.error('Periodic sync error:', err));
   }, 30 * 60 * 1000);
+
+  setInterval(() => {
+    checkAndRunScheduledDigests().catch(err => console.error('Telegram digest scheduler error:', err));
+  }, 60 * 1000);
+
+  setInterval(() => {
+    pollTelegramUpdates().catch(() => {});
+  }, 12 * 1000);
 }
 
 export { app };

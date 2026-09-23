@@ -24,21 +24,70 @@ describe('Lenz REST API Integration Tests', () => {
     expect(res.body.id).toBeDefined();
   });
 
-  it('GET /api/directory returns curated catalog', async () => {
+  it('GET /api/directory returns curated catalog with at least 10 categories and at least 20 websites in each category', async () => {
     const res = await request(app).get('/api/directory');
     expect(res.status).toBe(200);
     expect(res.body.directory).toBeDefined();
-    expect(res.body.directory.length).toBeGreaterThan(5);
-    const hn = res.body.directory.find((d: any) => d.id === 'hn');
-    expect(hn).toBeDefined();
+    expect(res.body.directory.length).toBeGreaterThanOrEqual(200);
+
+    const categories = Array.from(new Set(res.body.directory.map((d: any) => d.category)));
+    expect(categories.length).toBeGreaterThanOrEqual(10);
+
+    // Each category must have at least 20 websites
+    for (const cat of categories) {
+      const itemsInCat = res.body.directory.filter((d: any) => d.category === cat);
+      expect(itemsInCat.length).toBeGreaterThanOrEqual(20);
+    }
+
+    // Every website must have unique ID, unique URL, and required fields
+    const idSet = new Set<string>();
+    const urlSet = new Set<string>();
+    for (const item of res.body.directory) {
+      expect(item.id).toBeDefined();
+      expect(item.id.length).toBeGreaterThan(0);
+      expect(idSet.has(item.id)).toBe(false);
+      idSet.add(item.id);
+
+      expect(item.url).toBeDefined();
+      expect(urlSet.has(item.url)).toBe(false);
+      urlSet.add(item.url);
+
+      expect(item.title).toBeTruthy();
+      expect(item.description).toBeTruthy();
+      expect(item.url).toMatch(/^https?:\/\//);
+      expect(item.siteUrl).toMatch(/^https?:\/\//);
+      expect(item.category).toBeTruthy();
+      expect(item.icon).toBeTruthy();
+    }
   });
 
-  it('POST /api/directory/subscribe subscribes to a curated feed', async () => {
+  it('POST /api/directory/subscribe subscribes to a curated feed and assigns category folder', async () => {
     const res = await request(app)
       .post('/api/directory/subscribe')
       .send({ directoryId: 'hn' });
     expect(res.status).toBe(200);
     expect(res.body.id).toBeDefined();
+
+    // Verify feed is in DB
+    const feed = db.prepare('SELECT * FROM feeds WHERE id = ?').get(res.body.id) as any;
+    expect(feed).toBeDefined();
+    expect(feed.url).toBe('https://news.ycombinator.com/rss');
+    expect(feed.folder_id).toBeDefined();
+
+    // Verify re-subscription returns alreadySubscribed
+    const res2 = await request(app)
+      .post('/api/directory/subscribe')
+      .send({ directoryId: 'hn' });
+    expect(res2.status).toBe(200);
+    expect(res2.body.id).toBe(res.body.id);
+    expect(res2.body.alreadySubscribed).toBe(true);
+  });
+
+  it('POST /api/directory/subscribe returns 404 for unknown directoryId', async () => {
+    const res = await request(app)
+      .post('/api/directory/subscribe')
+      .send({ directoryId: 'nonexistent-item-xyz' });
+    expect(res.status).toBe(404);
   });
 
   it('GET /api/feeds returns subscribed feeds with unread counts', async () => {
