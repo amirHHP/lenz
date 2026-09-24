@@ -141,3 +141,12 @@ export interface TelegramStatusResponse {
   subscriptions: TelegramSubscription[];
   folders: TelegramFolderSummary[];
 }
+
+export interface User {
+  id: number;
+  username: string;
+  displayName: string;
+  email?: string | null;
+  createdAt?: string;
+}
+

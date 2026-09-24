@@ -35,8 +35,8 @@ export const DEFAULT_FOLDERS = [
 ];
 
 export function hashPassword(password: string, salt?: string): string {
-  const s = salt || crypto.randomBytes(16).toString('hex');
-  const hash = crypto.pbkdf2Sync(password, s, 100000, 32, 'sha256').toString('hex');
+  const s = salt || Buffer.from(crypto.randomBytes(16)).toString('hex');
+  const hash = Buffer.from(crypto.pbkdf2Sync(password, s, 100000, 32, 'sha256')).toString('hex');
   return `${s}:${hash}`;
 }
 
@@ -45,7 +45,7 @@ export function verifyPassword(password: string, storedHash: string): boolean {
   const parts = storedHash.split(':');
   if (parts.length !== 2) return false;
   const [salt, expectedHash] = parts;
-  const hash = crypto.pbkdf2Sync(password, salt, 100000, 32, 'sha256').toString('hex');
+  const hash = Buffer.from(crypto.pbkdf2Sync(password, salt, 100000, 32, 'sha256')).toString('hex');
   try {
     return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(expectedHash, 'hex'));
   } catch {
@@ -54,7 +54,7 @@ export function verifyPassword(password: string, storedHash: string): boolean {
 }
 
 export function generateSessionToken(): string {
-  return crypto.randomBytes(32).toString('hex');
+  return Buffer.from(crypto.randomBytes(32)).toString('hex');
 }
 
 export function createSession(userId: number, daysValid = 30): { token: string; expiresAt: string } {

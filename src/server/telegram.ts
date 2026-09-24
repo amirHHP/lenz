@@ -26,14 +26,19 @@ export interface TelegramDigestResult {
 /**
  * Retrieves the configured Telegram bot token from environment or database.
  */
-export function getTelegramBotToken(): string | null {
+export function getTelegramBotToken(userId: number = 1): string | null {
   if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_BOT_TOKEN.trim().length > 0) {
     return process.env.TELEGRAM_BOT_TOKEN.trim();
   }
   try {
-    const row = db.prepare("SELECT value FROM user_profile WHERE key = 'telegram_bot_token'").get() as { value: string } | undefined;
+    const keyName = userId === 1 ? 'telegram_bot_token' : `telegram_bot_token_${userId}`;
+    const row = db.prepare('SELECT value FROM user_profile WHERE key = ?').get(keyName) as { value: string } | undefined;
     if (row && row.value && row.value.trim().length > 0) {
       return row.value.trim();
+    }
+    const fallback = db.prepare("SELECT value FROM user_profile WHERE key = 'telegram_bot_token'").get() as { value: string } | undefined;
+    if (fallback && fallback.value && fallback.value.trim().length > 0) {
+      return fallback.value.trim();
     }
   } catch {
     // Database might not be initialized yet
@@ -44,15 +49,16 @@ export function getTelegramBotToken(): string | null {
 /**
  * Saves or updates the Telegram bot token in the user profile table.
  */
-export function setTelegramBotToken(token: string | null): void {
+export function setTelegramBotToken(token: string | null, userId: number = 1): void {
   const clean = token?.trim() || '';
+  const keyName = userId === 1 ? 'telegram_bot_token' : `telegram_bot_token_${userId}`;
   if (!clean) {
-    db.prepare("DELETE FROM user_profile WHERE key = 'telegram_bot_token'").run();
+    db.prepare('DELETE FROM user_profile WHERE key = ?').run(keyName);
   } else {
     db.prepare(`
-      INSERT INTO user_profile (key, value) VALUES ('telegram_bot_token', ?)
+      INSERT INTO user_profile (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(clean);
+    `).run(keyName, clean);
   }
 }
 
@@ -366,18 +372,19 @@ export function isSubscriptionDueToSend(
  */
 export async function generateGroupNewsDigest(
   folderIds: number[] | 'all' = 'all',
-  options?: { maxArticlesPerGroup?: number; now?: Date }
+  options?: { maxArticlesPerGroup?: number; now?: Date; userId?: number }
 ): Promise<TelegramDigestResult> {
   const maxArticles = options?.maxArticlesPerGroup || 4;
   const now = options?.now || new Date();
+  const userId = options?.userId || 1;
   const { displayFull } = getCurrentTimeInTimezone('Asia/Tehran', now);
 
   let targetFolders: any[] = [];
   if (folderIds === 'all') {
-    targetFolders = db.prepare('SELECT * FROM folders ORDER BY order_index ASC, id ASC').all();
+    targetFolders = db.prepare('SELECT * FROM folders WHERE user_id = ? ORDER BY order_index ASC, id ASC').all(userId);
   } else if (Array.isArray(folderIds) && folderIds.length > 0) {
     const placeholders = folderIds.map(() => '?').join(',');
-    targetFolders = db.prepare(`SELECT * FROM folders WHERE id IN (${placeholders}) ORDER BY order_index ASC, id ASC`).all(...folderIds);
+    targetFolders = db.prepare(`SELECT * FROM folders WHERE id IN (${placeholders}) AND user_id = ? ORDER BY order_index ASC, id ASC`).all(...folderIds, userId);
   }
 
   const groupSections: string[] = [];
@@ -520,8 +527,9 @@ export async function sendDigestToSubscription(
     }
   }
 
-  const digest = await generateGroupNewsDigest(folderIds);
-  const botToken = row.bot_token || getTelegramBotToken();
+  const subUserId = row.user_id || 1;
+  const digest = await generateGroupNewsDigest(folderIds, { userId: subUserId });
+  const botToken = row.bot_token || getTelegramBotToken(subUserId);
 
   if (!botToken) {
     return { success: false, messageCount: 0, error: 'توکن ربات تلگرام تنظیم نشده است.' };
@@ -611,16 +619,19 @@ export async function handleTelegramWebhookUpdate(update: any): Promise<{
   const firstName = message.from?.first_name || null;
 
   if (text.startsWith('/start')) {
-    // Register or reactivate subscriber
+    // Register or reactivate subscriber for the corresponding user (or user 1 by default)
+    const existing = db.prepare('SELECT user_id FROM telegram_subscriptions WHERE chat_id = ? LIMIT 1').get(chatId) as any;
+    const targetUserId = existing?.user_id || 1;
+
     db.prepare(`
-      INSERT INTO telegram_subscriptions (chat_id, username, first_name, schedule_times, timezone, folder_ids, is_active)
-      VALUES (?, ?, ?, '["09:00","21:00"]', 'Asia/Tehran', 'all', 1)
-      ON CONFLICT(chat_id) DO UPDATE SET 
+      INSERT INTO telegram_subscriptions (user_id, chat_id, username, first_name, schedule_times, timezone, folder_ids, is_active)
+      VALUES (?, ?, ?, ?, '["09:00","21:00"]', 'Asia/Tehran', 'all', 1)
+      ON CONFLICT(user_id, chat_id) DO UPDATE SET 
         username = excluded.username,
         first_name = excluded.first_name,
         is_active = 1,
         updated_at = CURRENT_TIMESTAMP
-    `).run(chatId, username, firstName);
+    `).run(targetUserId, chatId, username, firstName);
 
     const welcomeMsg = `سلام ${firstName ? escapeTelegramHtml(firstName) : 'کاربر گرامی'}! 👋\n` +
       `به دستیار تلگرام فیدخوان هوشمند <b>لنز (Lenz)</b> خوش آمدید.\n\n` +
@@ -640,6 +651,8 @@ export async function handleTelegramWebhookUpdate(update: any): Promise<{
 
   if (text.startsWith('/digest') || text.startsWith('/summary')) {
     const sub = db.prepare('SELECT * FROM telegram_subscriptions WHERE chat_id = ?').get(chatId) as any;
+    const subUserId = sub?.user_id || 1;
+    const botToken = sub?.bot_token || getTelegramBotToken(subUserId);
     let folderIds: number[] | 'all' = 'all';
     if (sub && sub.folder_ids && sub.folder_ids !== 'all') {
       try {
@@ -649,21 +662,25 @@ export async function handleTelegramWebhookUpdate(update: any): Promise<{
       }
     }
 
-    const digest = await generateGroupNewsDigest(folderIds);
+    const digest = await generateGroupNewsDigest(folderIds, { userId: subUserId });
     for (const chunk of digest.textChunks) {
-      await sendTelegramMessage(chatId, chunk);
+      await sendTelegramMessage(chatId, chunk, botToken);
     }
     return { handled: true, replySent: true, replyText: 'خلاصه اخبار ارسال شد' };
   }
 
   if (text.startsWith('/folders') || text.startsWith('/groups')) {
+    const sub = db.prepare('SELECT * FROM telegram_subscriptions WHERE chat_id = ?').get(chatId) as any;
+    const subUserId = sub?.user_id || 1;
+    const botToken = sub?.bot_token || getTelegramBotToken(subUserId);
     const folders = db.prepare(`
       SELECT f.name, 
-        (SELECT COUNT(*) FROM feeds WHERE folder_id = f.id) as feed_count,
-        (SELECT COUNT(*) FROM articles a JOIN feeds fd ON a.feed_id = fd.id WHERE fd.folder_id = f.id AND a.is_read = 0) as unread_count
+        (SELECT COUNT(*) FROM feeds WHERE folder_id = f.id AND user_id = ?) as feed_count,
+        (SELECT COUNT(*) FROM articles a JOIN feeds fd ON a.feed_id = fd.id WHERE fd.folder_id = f.id AND fd.user_id = ? AND a.is_read = 0) as unread_count
       FROM folders f
+      WHERE f.user_id = ?
       ORDER BY f.order_index ASC
-    `).all() as any[];
+    `).all(subUserId, subUserId, subUserId) as any[];
 
     let reply = `📂 <b>گروه‌ها و دسته‌های خبری لنز:</b>\n\n`;
     for (const f of folders) {
@@ -671,15 +688,17 @@ export async function handleTelegramWebhookUpdate(update: any): Promise<{
     }
     reply += `\nبرای دریافت فوری خلاصه هر زمان دستور /digest را بفرستید.`;
 
-    const res = await sendTelegramMessage(chatId, reply);
+    const res = await sendTelegramMessage(chatId, reply, botToken);
     return { handled: true, replySent: res.ok, replyText: reply, error: res.error };
   }
 
   if (text.startsWith('/status')) {
     const sub = db.prepare('SELECT * FROM telegram_subscriptions WHERE chat_id = ?').get(chatId) as any;
+    const subUserId = sub?.user_id || 1;
+    const botToken = sub?.bot_token || getTelegramBotToken(subUserId);
     if (!sub) {
       const notFoundMsg = `شما هنوز عضو نشده‌اید. برای اتصال دستور /start را ارسال کنید.`;
-      await sendTelegramMessage(chatId, notFoundMsg);
+      await sendTelegramMessage(chatId, notFoundMsg, botToken);
       return { handled: true, replySent: true, replyText: notFoundMsg };
     }
 
@@ -698,7 +717,7 @@ export async function handleTelegramWebhookUpdate(update: any): Promise<{
       `• گروه‌های انتخابی: ${sub.folder_ids === 'all' ? 'همه گروه‌ها' : 'گروه‌های مشخص‌شده'}\n` +
       `• آخرین ارسال: ${sub.last_sent_at ? sub.last_sent_at : 'هنوز ارسالی انجام نشده'}`;
 
-    const res = await sendTelegramMessage(chatId, statusMsg);
+    const res = await sendTelegramMessage(chatId, statusMsg, botToken);
     return { handled: true, replySent: res.ok, replyText: statusMsg, error: res.error };
   }
 

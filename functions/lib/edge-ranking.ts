@@ -69,16 +69,17 @@ export function extractKeywords(text: string): string[] {
     .map(([w]) => w);
 }
 
-export async function getUserTasteProfile(db: D1Database): Promise<UserTasteProfile> {
-  const row = await db.prepare('SELECT value FROM user_profile WHERE key = ?').bind('taste_profile').first<{ value: string }>();
+export async function getUserTasteProfile(db: D1Database, userId: number = 1): Promise<UserTasteProfile> {
+  const key = userId === 1 ? 'taste_profile' : `taste_profile_${userId}`;
+  const row = await db.prepare('SELECT value FROM user_profile WHERE key = ?').bind(key).first<{ value: string }>();
   if (row && row.value) {
     try {
       const parsed = JSON.parse(row.value);
-      // Synchronize live counts from D1
+      // Synchronize live counts from D1 for this user
       const [readRes, starRes, hlRes] = await Promise.all([
-        db.prepare('SELECT COUNT(*) as c FROM articles WHERE is_read = 1').first<{ c: number }>(),
-        db.prepare('SELECT COUNT(*) as c FROM articles WHERE is_starred = 1').first<{ c: number }>(),
-        db.prepare('SELECT COUNT(*) as c FROM highlights').first<{ c: number }>()
+        db.prepare('SELECT COUNT(*) as c FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE f.user_id = ? AND a.is_read = 1').bind(userId).first<{ c: number }>(),
+        db.prepare('SELECT COUNT(*) as c FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE f.user_id = ? AND a.is_starred = 1').bind(userId).first<{ c: number }>(),
+        db.prepare('SELECT COUNT(*) as c FROM highlights h JOIN articles a ON h.article_id = a.id JOIN feeds f ON a.feed_id = f.id WHERE f.user_id = ?').bind(userId).first<{ c: number }>()
       ]);
       parsed.readCount = readRes?.c ?? 0;
       parsed.starredCount = starRes?.c ?? 0;
@@ -108,10 +109,11 @@ export async function getUserTasteProfile(db: D1Database): Promise<UserTasteProf
   };
 }
 
-export async function saveUserTasteProfile(db: D1Database, profile: UserTasteProfile): Promise<void> {
+export async function saveUserTasteProfile(db: D1Database, profile: UserTasteProfile, userId: number = 1): Promise<void> {
   profile.lastUpdated = new Date().toISOString();
+  const key = userId === 1 ? 'taste_profile' : `taste_profile_${userId}`;
   await db.prepare('INSERT INTO user_profile (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-    .bind('taste_profile', JSON.stringify(profile))
+    .bind(key, JSON.stringify(profile))
     .run();
 }
 
@@ -203,10 +205,11 @@ export async function calculateArticleImportance(
 }
 
 export async function onArticleStarred(db: D1Database, articleId: number): Promise<void> {
-  const article = await db.prepare('SELECT * FROM articles WHERE id = ?').bind(articleId).first<any>();
+  const article = await db.prepare('SELECT a.*, f.user_id FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE a.id = ?').bind(articleId).first<any>();
   if (!article) return;
+  const userId = article.user_id || 1;
 
-  const profile = await getUserTasteProfile(db);
+  const profile = await getUserTasteProfile(db, userId);
   const keywords = extractKeywords(`${article.title} ${article.summary || ''}`);
   for (const kw of keywords.slice(0, 8)) {
     profile.topics[kw] = (profile.topics[kw] || 0) + 3;
@@ -214,14 +217,15 @@ export async function onArticleStarred(db: D1Database, articleId: number): Promi
   const feedKey = article.feed_id.toString();
   profile.feedAffinity[feedKey] = (profile.feedAffinity[feedKey] || 0) + 2;
 
-  await saveUserTasteProfile(db, profile);
+  await saveUserTasteProfile(db, profile, userId);
 }
 
 export async function onArticleUnstarred(db: D1Database, articleId: number): Promise<void> {
-  const article = await db.prepare('SELECT * FROM articles WHERE id = ?').bind(articleId).first<any>();
+  const article = await db.prepare('SELECT a.*, f.user_id FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE a.id = ?').bind(articleId).first<any>();
   if (!article) return;
+  const userId = article.user_id || 1;
 
-  const profile = await getUserTasteProfile(db);
+  const profile = await getUserTasteProfile(db, userId);
   const keywords = extractKeywords(`${article.title} ${article.summary || ''}`);
   for (const kw of keywords.slice(0, 8)) {
     if (profile.topics[kw]) {
@@ -235,14 +239,15 @@ export async function onArticleUnstarred(db: D1Database, articleId: number): Pro
     if (profile.feedAffinity[feedKey] === 0) delete profile.feedAffinity[feedKey];
   }
 
-  await saveUserTasteProfile(db, profile);
+  await saveUserTasteProfile(db, profile, userId);
 }
 
 export async function onHighlightCreated(db: D1Database, articleId: number, text: string): Promise<void> {
-  const article = await db.prepare('SELECT * FROM articles WHERE id = ?').bind(articleId).first<any>();
+  const article = await db.prepare('SELECT a.*, f.user_id FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE a.id = ?').bind(articleId).first<any>();
   if (!article) return;
+  const userId = article.user_id || 1;
 
-  const profile = await getUserTasteProfile(db);
+  const profile = await getUserTasteProfile(db, userId);
   const keywords = extractKeywords(text);
   for (const kw of keywords.slice(0, 6)) {
     profile.topics[kw] = (profile.topics[kw] || 0) + 4;
@@ -250,11 +255,16 @@ export async function onHighlightCreated(db: D1Database, articleId: number, text
   const feedKey = article.feed_id.toString();
   profile.feedAffinity[feedKey] = (profile.feedAffinity[feedKey] || 0) + 1;
 
-  await saveUserTasteProfile(db, profile);
+  await saveUserTasteProfile(db, profile, userId);
 }
 
 export async function onHighlightDeleted(db: D1Database, text: string, articleId?: number): Promise<void> {
-  const profile = await getUserTasteProfile(db);
+  let userId = 1;
+  if (articleId) {
+    const article = await db.prepare('SELECT a.*, f.user_id FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE a.id = ?').bind(articleId).first<any>();
+    if (article?.user_id) userId = article.user_id;
+  }
+  const profile = await getUserTasteProfile(db, userId);
   const keywords = extractKeywords(text);
   for (const kw of keywords.slice(0, 6)) {
     if (profile.topics[kw]) {
@@ -262,14 +272,15 @@ export async function onHighlightDeleted(db: D1Database, text: string, articleId
       if (profile.topics[kw] === 0) delete profile.topics[kw];
     }
   }
-  await saveUserTasteProfile(db, profile);
+  await saveUserTasteProfile(db, profile, userId);
 }
 
 export async function onArticleRead(db: D1Database, articleId: number): Promise<void> {
-  const article = await db.prepare('SELECT * FROM articles WHERE id = ?').bind(articleId).first<any>();
+  const article = await db.prepare('SELECT a.*, f.user_id FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE a.id = ?').bind(articleId).first<any>();
   if (!article) return;
+  const userId = article.user_id || 1;
 
-  const profile = await getUserTasteProfile(db);
+  const profile = await getUserTasteProfile(db, userId);
   const keywords = extractKeywords(article.title);
   for (const kw of keywords.slice(0, 4)) {
     profile.topics[kw] = (profile.topics[kw] || 0) + 0.5;
@@ -277,14 +288,15 @@ export async function onArticleRead(db: D1Database, articleId: number): Promise<
   const feedKey = article.feed_id.toString();
   profile.feedAffinity[feedKey] = (profile.feedAffinity[feedKey] || 0) + 0.3;
 
-  await saveUserTasteProfile(db, profile);
+  await saveUserTasteProfile(db, profile, userId);
 }
 
 export async function onArticleUnread(db: D1Database, articleId: number): Promise<void> {
-  const article = await db.prepare('SELECT * FROM articles WHERE id = ?').bind(articleId).first<any>();
+  const article = await db.prepare('SELECT a.*, f.user_id FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE a.id = ?').bind(articleId).first<any>();
   if (!article) return;
+  const userId = article.user_id || 1;
 
-  const profile = await getUserTasteProfile(db);
+  const profile = await getUserTasteProfile(db, userId);
   const keywords = extractKeywords(article.title);
   for (const kw of keywords.slice(0, 4)) {
     if (profile.topics[kw]) {
@@ -298,5 +310,5 @@ export async function onArticleUnread(db: D1Database, articleId: number): Promis
     if (profile.feedAffinity[feedKey] === 0) delete profile.feedAffinity[feedKey];
   }
 
-  await saveUserTasteProfile(db, profile);
+  await saveUserTasteProfile(db, profile, userId);
 }

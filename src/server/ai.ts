@@ -25,14 +25,19 @@ export interface TodayBriefingData {
 /**
  * Gets Gemini API Key from environment or database settings.
  */
-export function getGeminiApiKey(): string | null {
+export function getGeminiApiKey(userId: number = 1): string | null {
   if (process.env.GEMINI_API_KEY) {
     return process.env.GEMINI_API_KEY;
   }
   try {
-    const row = db.prepare('SELECT value FROM user_profile WHERE key = ?').get('gemini_api_key') as { value: string } | undefined;
+    const keyName = userId === 1 ? 'gemini_api_key' : `gemini_api_key_${userId}`;
+    const row = db.prepare('SELECT value FROM user_profile WHERE key = ?').get(keyName) as { value: string } | undefined;
     if (row && row.value && row.value.trim().length > 0) {
       return row.value.trim();
+    }
+    const fallback = db.prepare('SELECT value FROM user_profile WHERE key = ?').get('gemini_api_key') as { value: string } | undefined;
+    if (fallback && fallback.value && fallback.value.trim().length > 0) {
+      return fallback.value.trim();
     }
   } catch {
     // ignore
@@ -44,11 +49,11 @@ export function getGeminiApiKey(): string | null {
  * Generates Today's Briefing («امروز چه خبر»).
  * Uses Gemini 3.8 Flash if API key is available, or high quality local NLP synthesis fallback.
  */
-export async function generateTodayBriefing(): Promise<TodayBriefingData> {
+export async function generateTodayBriefing(userId: number = 1): Promise<TodayBriefingData> {
   const todayStr = new Date().toISOString().split('T')[0];
 
   // Check if we already have a cached briefing for today generated recently (last 2 hours)
-  const cached = db.prepare('SELECT * FROM briefings WHERE date = ?').get(todayStr) as any;
+  const cached = db.prepare('SELECT * FROM briefings WHERE date = ? AND (user_id = ? OR (? = 1 AND user_id IS NULL))').get(todayStr, userId, userId) as any;
   if (cached) {
     try {
       const parsed = JSON.parse(cached.content_json);
@@ -63,10 +68,10 @@ export async function generateTodayBriefing(): Promise<TodayBriefingData> {
     SELECT a.id, a.title, a.summary, a.full_content, a.link, a.published_at, a.importance_score, f.title as feed_title
     FROM articles a
     JOIN feeds f ON a.feed_id = f.id
-    WHERE datetime(a.published_at) >= datetime('now', '-2 days')
+    WHERE f.user_id = ? AND datetime(a.published_at) >= datetime('now', '-2 days')
     ORDER BY a.importance_score DESC
     LIMIT 25
-  `).all() as any[];
+  `).all(userId) as any[];
 
   // Fallback to top recent articles overall if none found in last 48h
   if (articles.length === 0) {
@@ -74,9 +79,10 @@ export async function generateTodayBriefing(): Promise<TodayBriefingData> {
       SELECT a.id, a.title, a.summary, a.full_content, a.link, a.published_at, a.importance_score, f.title as feed_title
       FROM articles a
       JOIN feeds f ON a.feed_id = f.id
+      WHERE f.user_id = ?
       ORDER BY a.published_at DESC, a.importance_score DESC
       LIMIT 25
-    `).all() as any[];
+    `).all(userId) as any[];
   }
 
   if (articles.length === 0) {
@@ -89,7 +95,7 @@ export async function generateTodayBriefing(): Promise<TodayBriefingData> {
     };
   }
 
-  const apiKey = getGeminiApiKey();
+  const apiKey = getGeminiApiKey(userId);
 
   if (apiKey) {
     try {
@@ -145,11 +151,15 @@ ${articles.map((a, i) => `[${i + 1}] شناسه: ${a.id} | عنوان: ${a.title
       }
 
       // Save briefing to DB
-      db.prepare(`
-        INSERT INTO briefings (date, title, content_json)
-        VALUES (?, ?, ?)
-        ON CONFLICT(date) DO UPDATE SET title = excluded.title, content_json = excluded.content_json
-      `).run(todayStr, 'امروز چه خبر — ' + todayStr, JSON.stringify(parsedData));
+      try {
+        db.prepare('DELETE FROM briefings WHERE date = ? AND user_id = ?').run(todayStr, userId);
+        db.prepare(`
+          INSERT INTO briefings (user_id, date, title, content_json)
+          VALUES (?, ?, ?, ?)
+        `).run(userId, todayStr, 'امروز چه خبر — ' + todayStr, JSON.stringify(parsedData));
+      } catch {
+        // ignore
+      }
 
       return parsedData;
     } catch (geminiError) {
@@ -158,7 +168,7 @@ ${articles.map((a, i) => `[${i + 1}] شناسه: ${a.id} | عنوان: ${a.title
   }
 
   // Local Rule-Based & NLP Fallback Synthesizer
-  return generateLocalNLPBriefing(todayStr, articles);
+  return generateLocalNLPBriefing(todayStr, articles, userId);
 }
 
 /**
@@ -180,7 +190,7 @@ function extractJsonFromText(text: string): any {
 /**
  * High-quality local NLP synthesis engine that clusters news by theme without requiring external APIs.
  */
-function generateLocalNLPBriefing(todayStr: string, articles: any[]): TodayBriefingData {
+function generateLocalNLPBriefing(todayStr: string, articles: any[], userId: number = 1): TodayBriefingData {
   // Topic clustering keywords
   const clusters: Record<string, { title: string; matchers: RegExp[]; articles: any[] }> = {
     tech_ai: {
@@ -249,11 +259,11 @@ function generateLocalNLPBriefing(todayStr: string, articles: any[]): TodayBrief
 
   // Cache briefing in DB
   try {
+    db.prepare('DELETE FROM briefings WHERE date = ? AND user_id = ?').run(todayStr, userId);
     db.prepare(`
-      INSERT INTO briefings (date, title, content_json)
-      VALUES (?, ?, ?)
-      ON CONFLICT(date) DO UPDATE SET title = excluded.title, content_json = excluded.content_json
-    `).run(todayStr, 'امروز چه خبر — ' + todayStr, JSON.stringify(briefing));
+      INSERT INTO briefings (user_id, date, title, content_json)
+      VALUES (?, ?, ?, ?)
+    `).run(userId, todayStr, 'امروز چه خبر — ' + todayStr, JSON.stringify(briefing));
   } catch (e) {
     // ignore
   }
@@ -264,13 +274,13 @@ function generateLocalNLPBriefing(todayStr: string, articles: any[]): TodayBrief
 /**
  * Generates an AI summary for a single article.
  */
-export async function generateArticleSummary(articleId: number): Promise<string> {
+export async function generateArticleSummary(articleId: number, userId: number = 1): Promise<string> {
   const article = db.prepare(`
     SELECT a.*, f.title as feed_title 
     FROM articles a 
     JOIN feeds f ON a.feed_id = f.id 
-    WHERE a.id = ?
-  `).get(articleId) as any;
+    WHERE a.id = ? AND f.user_id = ?
+  `).get(articleId, userId) as any;
 
   if (!article) {
     throw new Error('مقاله یافت نشد');
@@ -280,7 +290,7 @@ export async function generateArticleSummary(articleId: number): Promise<string>
     return article.ai_summary;
   }
 
-  const apiKey = getGeminiApiKey();
+  const apiKey = getGeminiApiKey(userId);
   const textContent = article.full_content || article.summary || article.title;
 
   if (apiKey) {

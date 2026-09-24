@@ -16,9 +16,12 @@ import {
   Brain,
   Plus,
   Trash2,
-  Send
+  Send,
+  LogIn,
+  LogOut,
+  Users
 } from 'lucide-react';
-import { Folder, Feed, ActiveView } from '../types';
+import { Folder, Feed, ActiveView, User } from '../types';
 
 interface Props {
   activeView: ActiveView;
@@ -40,6 +43,9 @@ interface Props {
   onDeleteFeed: (feedId: number) => void;
   onUpdateFeed?: (feedId: number, folderId: number | null, title?: string) => void;
   onDeleteFolder?: (folderId: number) => void;
+  currentUser?: User | null;
+  onOpenAuth: () => void;
+  onLogout: () => void;
 }
 
 function safeDomain(urlStr: string): string {
@@ -70,7 +76,10 @@ export const Sidebar: React.FC<Props> = ({
   onOpenTelegram,
   onDeleteFeed,
   onUpdateFeed,
-  onDeleteFolder
+  onDeleteFolder,
+  currentUser,
+  onOpenAuth,
+  onLogout
 }) => {
   const [collapsedFolders, setCollapsedFolders] = useState<Record<number, boolean>>({});
 
@@ -103,6 +112,55 @@ export const Sidebar: React.FC<Props> = ({
         >
           <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin text-blue-500' : ''}`} />
         </button>
+      </div>
+
+      {/* User Account Bar */}
+      <div className="px-3 py-2 border-b border-zinc-200/50 dark:border-zinc-800/60 bg-zinc-100/50 dark:bg-zinc-900/40">
+        {currentUser ? (
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 overflow-hidden">
+              <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-blue-500 to-indigo-600 text-white flex items-center justify-center font-bold text-xs shrink-0 shadow-xs">
+                {currentUser.displayName ? currentUser.displayName.slice(0, 1) : 'U'}
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 truncate">
+                  {currentUser.displayName}
+                </p>
+                <p className="text-[10px] text-zinc-400 truncate" dir="ltr">
+                  @{currentUser.username}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                onClick={onOpenAuth}
+                title="تغییر حساب کاربری"
+                className="p-1 text-zinc-400 hover:text-blue-600 dark:hover:text-blue-400 rounded-md hover:bg-zinc-200/50 dark:hover:bg-zinc-800 transition-colors"
+              >
+                <Users className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={onLogout}
+                title="خروج از حساب"
+                className="p-1 text-zinc-400 hover:text-red-600 dark:hover:text-red-400 rounded-md hover:bg-zinc-200/50 dark:hover:bg-zinc-800 transition-colors"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            onClick={onOpenAuth}
+            className="w-full flex items-center justify-between px-2.5 py-1.5 bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 dark:hover:bg-blue-900/50 text-blue-600 dark:text-blue-400 rounded-lg text-xs font-semibold transition-all border border-blue-200/60 dark:border-blue-800/50"
+          >
+            <div className="flex items-center gap-2">
+              <LogIn className="w-3.5 h-3.5" />
+              <span>ورود / ساخت حساب شخصی</span>
+            </div>
+            <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+          </button>
+        )}
       </div>
 
       {/* Main Navigation Items */}

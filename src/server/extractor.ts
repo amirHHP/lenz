@@ -16,7 +16,8 @@ export interface ExtractedArticle {
 export async function extractFullArticle(url: string): Promise<ExtractedArticle | null> {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000); // 10s timeout
+    const timeoutMs = process.env.NODE_ENV === 'test' ? 500 : 10000;
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     const response = await fetch(url, {
       signal: controller.signal,

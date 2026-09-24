@@ -149,7 +149,7 @@ export async function syncFeedInD1(db: D1Database, feedId: number): Promise<{ in
   if (!feed) throw new Error('Feed not found');
 
   const parsed = await fetchAndParseFeed(feed.url);
-  const tasteProfile = await getUserTasteProfile(db);
+  const tasteProfile = await getUserTasteProfile(db, feed.user_id || 1);
 
   let inserted = 0;
   let updated = 0;
@@ -222,8 +222,11 @@ export async function syncFeedInD1(db: D1Database, feedId: number): Promise<{ in
   return { inserted, updated };
 }
 
-export async function syncAllFeedsInD1(db: D1Database): Promise<{ totalFeeds: number; inserted: number; updated: number }> {
-  const feedsRes = await db.prepare('SELECT id FROM feeds').all<{ id: number }>();
+export async function syncAllFeedsInD1(db: D1Database, userId?: number): Promise<{ totalFeeds: number; inserted: number; updated: number }> {
+  const query = userId ? 'SELECT id FROM feeds WHERE user_id = ?' : 'SELECT id FROM feeds';
+  const feedsRes = userId 
+    ? await db.prepare(query).bind(userId).all<{ id: number }>() 
+    : await db.prepare(query).all<{ id: number }>();
   const feeds = feedsRes.results || [];
   let totalInserted = 0;
   let totalUpdated = 0;

@@ -11,8 +11,10 @@ import { TasteProfileModal } from './components/TasteProfileModal';
 import { ShortcutsModal } from './components/ShortcutsModal';
 import { SettingsModal } from './components/SettingsModal';
 import { TelegramModal } from './components/TelegramModal';
+import { AuthModal } from './components/AuthModal';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
-import { Article, Feed, Folder, ActiveView } from './types';
+import { Article, Feed, Folder, ActiveView, User } from './types';
+import { getCurrentUser, logoutApi } from './api';
 
 export const App: React.FC = () => {
   // Theme state
@@ -36,6 +38,10 @@ export const App: React.FC = () => {
   const [feeds, setFeeds] = useState<Feed[]>([]);
   const [stats, setStats] = useState({ unread_total: 0, starred_total: 0, highlights_total: 0 });
 
+  // User & Auth State
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+
   // Filters & Sorting (defaults to smart importance)
   const [sort, setSort] = useState<'smart' | 'newest' | 'oldest'>('smart');
   const [filterUnreadOnly, setFilterUnreadOnly] = useState(false);
@@ -53,6 +59,20 @@ export const App: React.FC = () => {
   const [isTelegramOpen, setIsTelegramOpen] = useState(false);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Check auth status on startup
+  useEffect(() => {
+    getCurrentUser().then(res => {
+      if (res.authenticated && res.user) {
+        setCurrentUser(res.user);
+      } else {
+        const isGuest = sessionStorage.getItem('lenz_guest_mode');
+        if (!isGuest) {
+          setIsAuthModalOpen(true);
+        }
+      }
+    });
+  }, []);
 
   // Fetch folders and feeds
   const loadSidebarData = useCallback(async () => {
@@ -330,7 +350,32 @@ export const App: React.FC = () => {
     setIsAddFeedOpen(false);
     setIsNewFolderOpen(false);
     setIsTasteProfileOpen(false);
+    setIsAuthModalOpen(false);
   }, []);
+
+  // Auth actions
+  const handleAuthSuccess = useCallback((user: User) => {
+    setCurrentUser(user);
+    setActiveView({ type: 'all' });
+    setSelectedArticleId(null);
+    sessionStorage.removeItem('lenz_guest_mode');
+    loadSidebarData();
+    loadArticles();
+  }, [loadSidebarData, loadArticles]);
+
+  const handleLogout = useCallback(async () => {
+    await logoutApi();
+    setCurrentUser(null);
+    setActiveView({ type: 'all' });
+    setSelectedArticleId(null);
+    sessionStorage.removeItem('lenz_guest_mode');
+    setArticles([]);
+    setFolders([]);
+    setFeeds([]);
+    loadSidebarData();
+    loadArticles();
+    setIsAuthModalOpen(true);
+  }, [loadSidebarData, loadArticles]);
 
   // Register keyboard shortcuts
   useKeyboardShortcuts({
@@ -368,6 +413,9 @@ export const App: React.FC = () => {
           onDeleteFeed={handleDeleteFeed}
           onUpdateFeed={handleUpdateFeed}
           onDeleteFolder={handleDeleteFolder}
+          currentUser={currentUser}
+          onOpenAuth={() => setIsAuthModalOpen(true)}
+          onLogout={handleLogout}
         />
       )}
 
@@ -423,6 +471,10 @@ export const App: React.FC = () => {
         isDark={isDark}
         onToggleTheme={() => setIsDark(prev => !prev)}
         onOpenTelegram={() => setIsTelegramOpen(true)}
+        currentUser={currentUser}
+        onOpenAuth={() => setIsAuthModalOpen(true)}
+        onLogout={handleLogout}
+        onUpdateUser={setCurrentUser}
       />
       <TelegramModal
         isOpen={isTelegramOpen}
@@ -454,6 +506,15 @@ export const App: React.FC = () => {
       <TasteProfileModal
         isOpen={isTasteProfileOpen}
         onClose={() => setIsTasteProfileOpen(false)}
+      />
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onAuthSuccess={handleAuthSuccess}
+        onContinueAsGuest={() => {
+          sessionStorage.setItem('lenz_guest_mode', 'true');
+          setIsAuthModalOpen(false);
+        }}
       />
     </div>
   );

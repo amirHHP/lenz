@@ -22,37 +22,44 @@ export interface TodayBriefingData {
   categories: TodayBriefingCategory[];
 }
 
-export async function getGeminiApiKey(db: D1Database, env?: any): Promise<string | null> {
+export async function getGeminiApiKey(db: D1Database, env?: any, userId: number = 1): Promise<string | null> {
   if (env?.GEMINI_API_KEY) return env.GEMINI_API_KEY;
   try {
-    const row = await db.prepare('SELECT value FROM user_profile WHERE key = ?').bind('gemini_api_key').first<{ value: string }>();
+    const key = userId === 1 ? 'gemini_api_key' : `gemini_api_key_${userId}`;
+    const row = await db.prepare('SELECT value FROM user_profile WHERE key = ?').bind(key).first<{ value: string }>();
     if (row && row.value && row.value.trim().length > 0) {
       return row.value.trim();
+    }
+    if (userId !== 1) {
+      const fallback = await db.prepare("SELECT value FROM user_profile WHERE key = 'gemini_api_key'").first<{ value: string }>();
+      if (fallback && fallback.value && fallback.value.trim().length > 0) {
+        return fallback.value.trim();
+      }
     }
   } catch {}
   return null;
 }
 
-export async function generateTodayBriefingInD1(db: D1Database, env?: any): Promise<TodayBriefingData> {
+export async function generateTodayBriefingInD1(db: D1Database, env?: any, userId: number = 1): Promise<TodayBriefingData> {
   const todayStr = new Date().toISOString().split('T')[0];
 
   // Check cache in D1
-  const cached = await db.prepare('SELECT * FROM briefings WHERE date = ?').bind(todayStr).first<any>();
+  const cached = await db.prepare('SELECT * FROM briefings WHERE date = ? AND user_id = ?').bind(todayStr, userId).first<any>();
   if (cached) {
     try {
       return JSON.parse(cached.content_json);
     } catch {}
   }
 
-  // Fetch top articles from the last 48 hours
+  // Fetch top articles from the last 48 hours for this user
   const recentRes = await db.prepare(`
     SELECT a.id, a.title, a.summary, a.full_content, a.link, a.published_at, a.importance_score, f.title as feed_title
     FROM articles a
     JOIN feeds f ON a.feed_id = f.id
-    WHERE datetime(a.published_at) >= datetime('now', '-2 days')
+    WHERE f.user_id = ? AND datetime(a.published_at) >= datetime('now', '-2 days')
     ORDER BY a.importance_score DESC
     LIMIT 25
-  `).all<any>();
+  `).bind(userId).all<any>();
 
   let articles = recentRes.results || [];
   if (articles.length === 0) {
@@ -60,9 +67,10 @@ export async function generateTodayBriefingInD1(db: D1Database, env?: any): Prom
       SELECT a.id, a.title, a.summary, a.full_content, a.link, a.published_at, a.importance_score, f.title as feed_title
       FROM articles a
       JOIN feeds f ON a.feed_id = f.id
+      WHERE f.user_id = ?
       ORDER BY a.published_at DESC, a.importance_score DESC
       LIMIT 25
-    `).all<any>();
+    `).bind(userId).all<any>();
     articles = fallbackRes.results || [];
   }
 
@@ -75,7 +83,7 @@ export async function generateTodayBriefingInD1(db: D1Database, env?: any): Prom
     };
   }
 
-  const apiKey = await getGeminiApiKey(db, env);
+  const apiKey = await getGeminiApiKey(db, env, userId);
 
   if (apiKey) {
     try {
@@ -140,11 +148,11 @@ ${articles.map((a: any, i: number) => `[${i + 1}] شناسه: ${a.id} | عنوا
               }));
           }
 
+          await db.prepare('DELETE FROM briefings WHERE date = ? AND user_id = ?').bind(todayStr, userId).run();
           await db.prepare(`
-            INSERT INTO briefings (date, title, content_json)
-            VALUES (?, ?, ?)
-            ON CONFLICT(date) DO UPDATE SET title = excluded.title, content_json = excluded.content_json
-          `).bind(todayStr, 'امروز چه خبر — ' + todayStr, JSON.stringify(parsedData)).run();
+            INSERT INTO briefings (user_id, date, title, content_json)
+            VALUES (?, ?, ?, ?)
+          `).bind(userId, todayStr, 'امروز چه خبر — ' + todayStr, JSON.stringify(parsedData)).run();
 
           return parsedData;
         }
@@ -155,7 +163,7 @@ ${articles.map((a: any, i: number) => `[${i + 1}] شناسه: ${a.id} | عنوا
   }
 
   // Local NLP fallback
-  return generateLocalNLPBriefing(todayStr, articles, db);
+  return generateLocalNLPBriefing(todayStr, articles, db, userId);
 }
 
 function extractJsonFromText(text: string): any {
@@ -163,7 +171,7 @@ function extractJsonFromText(text: string): any {
   return JSON.parse(clean);
 }
 
-async function generateLocalNLPBriefing(todayStr: string, articles: any[], db: D1Database): Promise<TodayBriefingData> {
+async function generateLocalNLPBriefing(todayStr: string, articles: any[], db: D1Database, userId: number = 1): Promise<TodayBriefingData> {
   const categoryKeywords: Record<string, string[]> = {
     'هوش مصنوعی و نوآوری دیجیتال': ['هوش مصنوعی', 'ai', 'gpt', 'مدل', 'openai', 'گوگل', 'مایکروسافت', 'ماشین لرنینگ', 'داده'],
     'فناوری و استارتاپ': ['اپل', 'گوگل', 'آیفون', 'اندروید', 'سامسونگ', 'تراشه', 'پردازنده', 'نرم افزار', 'نرم‌افزار', 'استارتاپ', 'اینترنت'],
@@ -243,11 +251,80 @@ async function generateLocalNLPBriefing(todayStr: string, articles: any[], db: D
     categories
   };
 
+  await db.prepare('DELETE FROM briefings WHERE date = ? AND user_id = ?').bind(todayStr, userId).run();
   await db.prepare(`
-    INSERT INTO briefings (date, title, content_json)
-    VALUES (?, ?, ?)
-    ON CONFLICT(date) DO UPDATE SET title = excluded.title, content_json = excluded.content_json
-  `).bind(todayStr, 'امروز چه خبر — ' + todayStr, JSON.stringify(briefingData)).run();
+    INSERT INTO briefings (user_id, date, title, content_json)
+    VALUES (?, ?, ?, ?)
+  `).bind(userId, todayStr, 'امروز چه خبر — ' + todayStr, JSON.stringify(briefingData)).run();
 
   return briefingData;
+}
+
+/**
+ * Generates an AI summary for a single article on Cloudflare Workers / D1.
+ */
+export async function generateArticleSummaryInD1(
+  db: D1Database,
+  env: Env,
+  articleId: number,
+  userId: number = 1
+): Promise<string> {
+  const article = await db.prepare(`
+    SELECT a.*, f.title as feed_title 
+    FROM articles a 
+    JOIN feeds f ON a.feed_id = f.id 
+    WHERE a.id = ? AND f.user_id = ?
+  `).bind(articleId, userId).first<any>();
+
+  if (!article) {
+    throw new Error('مقاله یافت نشد');
+  }
+
+  if (article.ai_summary) {
+    return article.ai_summary;
+  }
+
+  const apiKey = await getGeminiApiKey(db, env, userId);
+  const textContent = article.full_content || article.summary || article.title;
+
+  if (apiKey) {
+    try {
+      const prompt = `شما دستیار خلاصه‌سازی نرم‌افزار لنز هستید.
+مقاله زیر را در ۳ نکته کلیدی و بولت‌وار (Bullet points) کوتاه به زبان فارسی خلاصه کن:
+عنوان: ${article.title}
+منبع: ${article.feed_title}
+متن:
+${textContent.slice(0, 4000)}
+`;
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.3 }
+          })
+        }
+      );
+      if (res.ok) {
+        const geminiData = await res.json() as any;
+        const summary = geminiData.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+        if (summary) {
+          await db.prepare('UPDATE articles SET ai_summary = ? WHERE id = ?').bind(summary, articleId).run();
+          return summary;
+        }
+      }
+    } catch (e) {
+      console.warn('Gemini article summary failed on edge:', e);
+    }
+  }
+
+  // Fallback: extract leading sentences
+  const cleanText = textContent.replace(/<[^>]*>?/gm, '').replace(/\s+/g, ' ').trim();
+  const sentences = cleanText.split(/[\.!\?\u06D4]/).filter((s: string) => s.trim().length > 25);
+  const fallbackSummary = sentences.slice(0, 3).map((s: string) => `• ${s.trim()}`).join('\n');
+
+  await db.prepare('UPDATE articles SET ai_summary = ? WHERE id = ?').bind(fallbackSummary, articleId).run();
+  return fallbackSummary;
 }

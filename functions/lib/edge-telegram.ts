@@ -56,11 +56,16 @@ export function chunkTelegramMessage(text: string, maxLen = 3900): string[] {
   return chunks.length > 0 ? chunks : [text];
 }
 
-export async function getTelegramBotToken(db: D1Database, env: Env): Promise<string | null> {
+export async function getTelegramBotToken(db: D1Database, env: Env, userId: number = 1): Promise<string | null> {
   if (env.TELEGRAM_BOT_TOKEN) return env.TELEGRAM_BOT_TOKEN;
   try {
-    const row = await db.prepare("SELECT value FROM user_profile WHERE key = 'telegram_bot_token'").first<{ value: string }>();
+    const key = userId === 1 ? 'telegram_bot_token' : `telegram_bot_token_${userId}`;
+    const row = await db.prepare('SELECT value FROM user_profile WHERE key = ?').bind(key).first<{ value: string }>();
     if (row && row.value?.trim()) return row.value.trim();
+    if (userId !== 1) {
+      const fallback = await db.prepare("SELECT value FROM user_profile WHERE key = 'telegram_bot_token'").first<{ value: string }>();
+      if (fallback && fallback.value?.trim()) return fallback.value.trim();
+    }
   } catch {
     // ignore
   }
@@ -101,15 +106,17 @@ export async function sendTelegramMessage(
 
 export async function generateGroupNewsDigestInD1(
   db: D1Database,
-  folderIds: number[] | 'all' = 'all'
+  folderIds: number[] | 'all' = 'all',
+  options?: { maxArticlesPerGroup?: number; now?: Date; userId?: number }
 ): Promise<{ textChunks: string[]; groupCount: number; articleCount: number }> {
+  const userId = options?.userId || 1;
   let targetFolders: any[] = [];
   if (folderIds === 'all') {
-    const foldersRes = await db.prepare('SELECT * FROM folders ORDER BY order_index ASC, id ASC').all();
+    const foldersRes = await db.prepare('SELECT * FROM folders WHERE user_id = ? ORDER BY order_index ASC, id ASC').bind(userId).all();
     targetFolders = foldersRes.results || [];
   } else if (Array.isArray(folderIds) && folderIds.length > 0) {
     const placeholders = folderIds.map(() => '?').join(',');
-    const foldersRes = await db.prepare(`SELECT * FROM folders WHERE id IN (${placeholders}) ORDER BY order_index ASC, id ASC`).bind(...folderIds).all();
+    const foldersRes = await db.prepare(`SELECT * FROM folders WHERE id IN (${placeholders}) AND user_id = ? ORDER BY order_index ASC, id ASC`).bind(...folderIds, userId).all();
     targetFolders = foldersRes.results || [];
   }
 
@@ -166,10 +173,10 @@ export async function generateGroupNewsDigestInD1(
       SELECT a.id, a.title, a.link, a.summary, a.ai_summary, a.importance_score, f.title as feed_title
       FROM articles a
       JOIN feeds f ON a.feed_id = f.id
-      WHERE f.folder_id IS NULL AND datetime(a.published_at) >= datetime('now', '-3 days')
+      WHERE f.user_id = ? AND f.folder_id IS NULL AND datetime(a.published_at) >= datetime('now', '-3 days')
       ORDER BY a.is_read ASC, a.importance_score DESC, a.published_at DESC
       LIMIT 4
-    `).all<any>();
+    `).bind(userId).all<any>();
 
     let unassignedArticles = unassignedRes.results || [];
     if (unassignedArticles.length === 0) {
@@ -177,10 +184,10 @@ export async function generateGroupNewsDigestInD1(
         SELECT a.id, a.title, a.link, a.summary, a.ai_summary, a.importance_score, f.title as feed_title
         FROM articles a
         JOIN feeds f ON a.feed_id = f.id
-        WHERE f.folder_id IS NULL
+        WHERE f.user_id = ? AND f.folder_id IS NULL
         ORDER BY a.is_read ASC, a.importance_score DESC, a.published_at DESC
         LIMIT 4
-      `).all<any>();
+      `).bind(userId).all<any>();
       unassignedArticles = unassignedRes.results || [];
     }
 
@@ -265,11 +272,14 @@ export async function handleTelegramWebhookUpdateInD1(
   if (!token) return { handled: false, replySent: false, error: 'No bot token' };
 
   if (text.startsWith('/start')) {
+    const existing = await db.prepare('SELECT user_id FROM telegram_subscriptions WHERE chat_id = ? LIMIT 1').bind(chatId).first<{ user_id: number }>();
+    const targetUserId = existing?.user_id || 1;
+
     await db.prepare(`
-      INSERT INTO telegram_subscriptions (chat_id, username, first_name, schedule_times, timezone, folder_ids, is_active)
-      VALUES (?, ?, ?, '["09:00","21:00"]', 'Asia/Tehran', 'all', 1)
-      ON CONFLICT(chat_id) DO UPDATE SET username = excluded.username, first_name = excluded.first_name, is_active = 1, updated_at = CURRENT_TIMESTAMP
-    `).bind(chatId, username, firstName).run();
+      INSERT INTO telegram_subscriptions (user_id, chat_id, username, first_name, schedule_times, timezone, folder_ids, is_active)
+      VALUES (?, ?, ?, ?, '["09:00","21:00"]', 'Asia/Tehran', 'all', 1)
+      ON CONFLICT(user_id, chat_id) DO UPDATE SET username = excluded.username, first_name = excluded.first_name, is_active = 1, updated_at = CURRENT_TIMESTAMP
+    `).bind(targetUserId, chatId, username, firstName).run();
 
     const welcomeMsg = `سلام ${firstName ? escapeTelegramHtml(firstName) : 'کاربر گرامی'}! 👋\n` +
       `به ربات فیدخوان هوشمند <b>لنز (Lenz)</b> خوش آمدید.\n\n` +
@@ -288,7 +298,8 @@ export async function handleTelegramWebhookUpdateInD1(
     if (sub && sub.folder_ids && sub.folder_ids !== 'all') {
       try { folderIds = JSON.parse(sub.folder_ids); } catch { folderIds = 'all'; }
     }
-    const digest = await generateGroupNewsDigestInD1(db, folderIds);
+    const subUserId = sub?.user_id || 1;
+    const digest = await generateGroupNewsDigestInD1(db, folderIds, { userId: subUserId });
     for (const chunk of digest.textChunks) {
       await sendTelegramMessage(token, chatId, chunk, env);
     }

@@ -199,8 +199,9 @@ export async function syncFeed(feedId: number): Promise<{ newCount: number }> {
 /**
  * Synchronizes all feeds in the database.
  */
-export async function syncAllFeeds(): Promise<{ totalNew: number }> {
-  const feeds = db.prepare('SELECT id FROM feeds').all() as { id: number }[];
+export async function syncAllFeeds(userId?: number): Promise<{ totalNew: number }> {
+  const query = userId ? 'SELECT id FROM feeds WHERE user_id = ?' : 'SELECT id FROM feeds';
+  const feeds = (userId ? db.prepare(query).all(userId) : db.prepare(query).all()) as { id: number }[];
   let totalNew = 0;
 
   for (const feed of feeds) {

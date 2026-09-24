@@ -264,14 +264,15 @@ export function calculateImportanceScore(params: {
  * Called when an article is starred: learns user taste and updates weights.
  */
 export function onArticleStarred(articleId: number): void {
-  const article = db.prepare('SELECT * FROM articles WHERE id = ?').get(articleId) as any;
+  const article = db.prepare('SELECT a.*, f.user_id FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE a.id = ?').get(articleId) as any;
   if (!article) return;
 
   try {
     db.prepare('UPDATE articles SET is_starred = 1 WHERE id = ?').run(articleId);
   } catch {}
 
-  const profile = getUserTasteProfile();
+  const userId = article.user_id || 1;
+  const profile = getUserTasteProfile(userId);
   profile.starredCount = (profile.starredCount || 0) + 1;
 
   // Boost feed affinity
@@ -284,22 +285,23 @@ export function onArticleStarred(articleId: number): void {
     profile.topics[kw] = (profile.topics[kw] || 0) + 5;
   }
 
-  saveUserTasteProfile(profile);
-  recalculateUnreadScores();
+  saveUserTasteProfile(profile, userId);
+  recalculateUnreadScores(userId);
 }
 
 /**
  * Called when an article is un-starred: reverts user taste weights.
  */
 export function onArticleUnstarred(articleId: number): void {
-  const article = db.prepare('SELECT * FROM articles WHERE id = ?').get(articleId) as any;
+  const article = db.prepare('SELECT a.*, f.user_id FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE a.id = ?').get(articleId) as any;
   if (!article) return;
 
   try {
     db.prepare('UPDATE articles SET is_starred = 0 WHERE id = ?').run(articleId);
   } catch {}
 
-  const profile = getUserTasteProfile();
+  const userId = article.user_id || 1;
+  const profile = getUserTasteProfile(userId);
   profile.starredCount = Math.max(0, (profile.starredCount || 0) - 1);
 
   // Reduce feed affinity
@@ -318,18 +320,19 @@ export function onArticleUnstarred(articleId: number): void {
     }
   }
 
-  saveUserTasteProfile(profile);
-  recalculateUnreadScores();
+  saveUserTasteProfile(profile, userId);
+  recalculateUnreadScores(userId);
 }
 
 /**
  * Called when text is highlighted: strong signal of deep interest in specific concepts.
  */
 export function onHighlightCreated(articleId: number, highlightText: string): void {
-  const article = db.prepare('SELECT * FROM articles WHERE id = ?').get(articleId) as any;
+  const article = db.prepare('SELECT a.*, f.user_id FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE a.id = ?').get(articleId) as any;
   if (!article) return;
 
-  const profile = getUserTasteProfile();
+  const userId = article.user_id || 1;
+  const profile = getUserTasteProfile(userId);
   profile.highlightCount = (profile.highlightCount || 0) + 1;
 
   // Highlights have the strongest topical weight
@@ -338,15 +341,17 @@ export function onHighlightCreated(articleId: number, highlightText: string): vo
     profile.topics[kw] = (profile.topics[kw] || 0) + 8;
   }
 
-  saveUserTasteProfile(profile);
-  recalculateUnreadScores();
+  saveUserTasteProfile(profile, userId);
+  recalculateUnreadScores(userId);
 }
 
 /**
  * Called when a highlight is deleted: reverts highlight topic weight.
  */
 export function onHighlightDeleted(articleId: number, highlightText: string): void {
-  const profile = getUserTasteProfile();
+  const article = db.prepare('SELECT a.*, f.user_id FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE a.id = ?').get(articleId) as any;
+  const userId = article?.user_id || 1;
+  const profile = getUserTasteProfile(userId);
   profile.highlightCount = Math.max(0, (profile.highlightCount || 0) - 1);
 
   const keywords = extractKeywords(highlightText);
@@ -357,22 +362,23 @@ export function onHighlightDeleted(articleId: number, highlightText: string): vo
     }
   }
 
-  saveUserTasteProfile(profile);
-  recalculateUnreadScores();
+  saveUserTasteProfile(profile, userId);
+  recalculateUnreadScores(userId);
 }
 
 /**
  * Called when an article is marked read.
  */
 export function onArticleRead(articleId: number): void {
-  const article = db.prepare('SELECT * FROM articles WHERE id = ?').get(articleId) as any;
+  const article = db.prepare('SELECT a.*, f.user_id FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE a.id = ?').get(articleId) as any;
   if (!article) return;
 
   try {
     db.prepare('UPDATE articles SET is_read = 1 WHERE id = ?').run(articleId);
   } catch {}
 
-  const profile = getUserTasteProfile();
+  const userId = article.user_id || 1;
+  const profile = getUserTasteProfile(userId);
   profile.readCount = (profile.readCount || 0) + 1;
 
   // Gentle topic boost
@@ -381,21 +387,22 @@ export function onArticleRead(articleId: number): void {
     profile.topics[kw] = (profile.topics[kw] || 0) + 1;
   }
 
-  saveUserTasteProfile(profile);
+  saveUserTasteProfile(profile, userId);
 }
 
 /**
  * Called when an article is marked unread: reverts gentle topic boost.
  */
 export function onArticleUnread(articleId: number): void {
-  const article = db.prepare('SELECT * FROM articles WHERE id = ?').get(articleId) as any;
+  const article = db.prepare('SELECT a.*, f.user_id FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE a.id = ?').get(articleId) as any;
   if (!article) return;
 
   try {
     db.prepare('UPDATE articles SET is_read = 0 WHERE id = ?').run(articleId);
   } catch {}
 
-  const profile = getUserTasteProfile();
+  const userId = article.user_id || 1;
+  const profile = getUserTasteProfile(userId);
   profile.readCount = Math.max(0, (profile.readCount || 0) - 1);
 
   const keywords = extractKeywords(article.title);
@@ -406,21 +413,26 @@ export function onArticleUnread(articleId: number): void {
     }
   }
 
-  saveUserTasteProfile(profile);
+  saveUserTasteProfile(profile, userId);
 }
 
 /**
  * Recalculates importance score for all unread articles with updated user taste and freshness.
  */
-export function recalculateUnreadScores(): void {
+export function recalculateUnreadScores(userId?: number): void {
   try {
-    const unreadArticles = db.prepare(`
-      SELECT id, title, summary, full_content, published_at, feed_id 
-      FROM articles 
-      WHERE is_read = 0 
-      ORDER BY published_at DESC 
-      LIMIT 200
-    `).all() as any[];
+    const query = userId
+      ? `SELECT a.id, a.title, a.summary, a.full_content, a.published_at, a.feed_id 
+         FROM articles a 
+         JOIN feeds f ON a.feed_id = f.id 
+         WHERE a.is_read = 0 AND f.user_id = ? 
+         ORDER BY a.published_at DESC LIMIT 200`
+      : `SELECT id, title, summary, full_content, published_at, feed_id 
+         FROM articles 
+         WHERE is_read = 0 
+         ORDER BY published_at DESC LIMIT 200`;
+
+    const unreadArticles = (userId ? db.prepare(query).all(userId) : db.prepare(query).all()) as any[];
 
     const updateStmt = db.prepare('UPDATE articles SET importance_score = ? WHERE id = ?');
     for (const art of unreadArticles) {

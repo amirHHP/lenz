@@ -185,55 +185,119 @@ export function initDatabase() {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
-
-    CREATE TABLE IF NOT EXISTS briefings (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER DEFAULT 1,
-      date TEXT NOT NULL,
-      title TEXT NOT NULL,
-      content_json TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS telegram_subscriptions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER DEFAULT 1,
-      chat_id TEXT NOT NULL UNIQUE,
-      username TEXT,
-      first_name TEXT,
-      bot_token TEXT,
-      schedule_times TEXT NOT NULL DEFAULT '["09:00","21:00"]',
-      timezone TEXT DEFAULT 'Asia/Tehran',
-      folder_ids TEXT DEFAULT 'all',
-      is_active INTEGER DEFAULT 1,
-      last_sent_at DATETIME,
-      last_sent_slot TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_telegram_active ON telegram_subscriptions(is_active);
-    CREATE INDEX IF NOT EXISTS idx_telegram_chat_id ON telegram_subscriptions(chat_id);
   `);
+
+  // 5. Briefings table & migration to per-user UNIQUE(user_id, date)
+  const briefingsCheck = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='briefings'").get();
+  if (!briefingsCheck) {
+    db.exec(`
+      CREATE TABLE briefings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id) ON DELETE CASCADE,
+        date TEXT NOT NULL,
+        title TEXT NOT NULL,
+        content_json TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, date)
+      );
+      CREATE INDEX IF NOT EXISTS idx_briefings_user_id ON briefings(user_id);
+      CREATE INDEX IF NOT EXISTS idx_briefings_date ON briefings(date);
+    `);
+  } else {
+    const briefingCols = db.prepare("PRAGMA table_info(briefings)").all() as any[];
+    const hasBriefingUserId = briefingCols.some(c => c.name === 'user_id');
+    const briefingSql = ((db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='briefings'").get() as any)?.sql || '').toLowerCase();
+    const hasGlobalBriefingUnique = briefingSql.includes('date text not null unique') || briefingSql.includes('unique (date)') || briefingSql.includes('unique(date)');
+
+    if (!hasBriefingUserId || hasGlobalBriefingUnique) {
+      db.pragma('foreign_keys = OFF');
+      db.exec(`
+        CREATE TABLE briefings_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id) ON DELETE CASCADE,
+          date TEXT NOT NULL,
+          title TEXT NOT NULL,
+          content_json TEXT NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(user_id, date)
+        );
+        INSERT OR IGNORE INTO briefings_new (id, user_id, date, title, content_json, created_at)
+        SELECT id, ${hasBriefingUserId ? 'COALESCE(user_id, 1)' : '1'}, date, title, content_json, created_at FROM briefings;
+        DROP TABLE briefings;
+        ALTER TABLE briefings_new RENAME TO briefings;
+        CREATE INDEX IF NOT EXISTS idx_briefings_user_id ON briefings(user_id);
+        CREATE INDEX IF NOT EXISTS idx_briefings_date ON briefings(date);
+      `);
+      db.pragma('foreign_keys = ON');
+    }
+  }
+
+  // 6. Telegram subscriptions table & migration to per-user UNIQUE(user_id, chat_id)
+  const tgCheck = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='telegram_subscriptions'").get();
+  if (!tgCheck) {
+    db.exec(`
+      CREATE TABLE telegram_subscriptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id) ON DELETE CASCADE,
+        chat_id TEXT NOT NULL,
+        username TEXT,
+        first_name TEXT,
+        bot_token TEXT,
+        schedule_times TEXT NOT NULL DEFAULT '["09:00","21:00"]',
+        timezone TEXT DEFAULT 'Asia/Tehran',
+        folder_ids TEXT DEFAULT 'all',
+        is_active INTEGER DEFAULT 1,
+        last_sent_at DATETIME,
+        last_sent_slot TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, chat_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_telegram_active ON telegram_subscriptions(is_active);
+      CREATE INDEX IF NOT EXISTS idx_telegram_chat_id ON telegram_subscriptions(chat_id);
+      CREATE INDEX IF NOT EXISTS idx_telegram_user_id ON telegram_subscriptions(user_id);
+    `);
+  } else {
+    const tgCols = db.prepare("PRAGMA table_info(telegram_subscriptions)").all() as any[];
+    const hasTgUserId = tgCols.some(c => c.name === 'user_id');
+    const tgSql = ((db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='telegram_subscriptions'").get() as any)?.sql || '').toLowerCase();
+    const hasGlobalChatUnique = tgSql.includes('chat_id text not null unique') || tgSql.includes('unique (chat_id)') || tgSql.includes('unique(chat_id)');
+
+    if (!hasTgUserId || hasGlobalChatUnique) {
+      db.pragma('foreign_keys = OFF');
+      db.exec(`
+        CREATE TABLE telegram_subscriptions_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id) ON DELETE CASCADE,
+          chat_id TEXT NOT NULL,
+          username TEXT,
+          first_name TEXT,
+          bot_token TEXT,
+          schedule_times TEXT NOT NULL DEFAULT '["09:00","21:00"]',
+          timezone TEXT DEFAULT 'Asia/Tehran',
+          folder_ids TEXT DEFAULT 'all',
+          is_active INTEGER DEFAULT 1,
+          last_sent_at DATETIME,
+          last_sent_slot TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(user_id, chat_id)
+        );
+        INSERT OR IGNORE INTO telegram_subscriptions_new (id, user_id, chat_id, username, first_name, bot_token, schedule_times, timezone, folder_ids, is_active, last_sent_at, last_sent_slot, created_at, updated_at)
+        SELECT id, ${hasTgUserId ? 'COALESCE(user_id, 1)' : '1'}, chat_id, username, first_name, bot_token, schedule_times, timezone, folder_ids, is_active, last_sent_at, last_sent_slot, created_at, updated_at FROM telegram_subscriptions;
+        DROP TABLE telegram_subscriptions;
+        ALTER TABLE telegram_subscriptions_new RENAME TO telegram_subscriptions;
+        CREATE INDEX IF NOT EXISTS idx_telegram_active ON telegram_subscriptions(is_active);
+        CREATE INDEX IF NOT EXISTS idx_telegram_chat_id ON telegram_subscriptions(chat_id);
+        CREATE INDEX IF NOT EXISTS idx_telegram_user_id ON telegram_subscriptions(user_id);
+      `);
+      db.pragma('foreign_keys = ON');
+    }
+  }
 
   // Ensure is_full_extracted column
   try {
     db.exec('ALTER TABLE articles ADD COLUMN is_full_extracted INTEGER DEFAULT 0');
-  } catch {}
-
-  // Ensure last_sent_slot column
-  try {
-    db.exec('ALTER TABLE telegram_subscriptions ADD COLUMN last_sent_slot TEXT');
-  } catch {}
-
-  // Ensure user_id column on telegram_subscriptions
-  try {
-    db.exec('ALTER TABLE telegram_subscriptions ADD COLUMN user_id INTEGER DEFAULT 1');
-  } catch {}
-
-  // Ensure user_id column on briefings
-  try {
-    db.exec('ALTER TABLE briefings ADD COLUMN user_id INTEGER DEFAULT 1');
   } catch {}
 
   // Seed default folders for user 1
